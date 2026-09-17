@@ -9,7 +9,8 @@ import time
 import numpy as np
 import torch
 
-from .protocol import SongRequest, GenerationConfig, Sampling, token_prefixes, negative_prefix, CODEC_OFFSET, resolve_sampling
+from .protocol import (SongRequest, GenerationConfig, Sampling, token_prefixes, negative_prefix,
+                       CODEC_OFFSET, CODEC_SIZE, resolve_sampling)
 from .storage import resolve_model, model_identity, identity, write_json, collect_hashes, sha256_file, copy_model_files
 from .tokenization_yue2 import YuE2TextTokenizer
 from .sampling import generate_tokens, synchronize
@@ -268,22 +269,63 @@ class YuE2Pipeline:
         return SymbolicPlan(request, self.tokenizer.decode(ids), ids,
                             token_prefixes(request, self.tokenizer, ids), timing, truncated)
 
-    def generate_semantic(self, plan, *, sampling=None, cancelled=None, on_token=None):
+    def _stage_boundary(self):
+        """Drain MPS allocator state between stages.
+
+        On Apple Silicon the semantic stage is sensitive to allocator state left
+        behind by the stage before it: planning on MPS and then generating in the
+        same process yields different tokens than generating from a clean pool,
+        which makes a take unreproducible. Draining and synchronising at every
+        stage boundary removes the dependency. A newer torch that happens to mask
+        the workload is not a reason to drop this.
+        """
+        if self.device.type == "mps":
+            torch.mps.empty_cache()
+            torch.mps.synchronize()
+
+    def generate_semantic(self, plan, *, sampling=None, carry=None, cancelled=None, on_token=None):
+        """Generate the semantic (music token) stage.
+
+        ``carry`` continues an earlier take: pass its ``SemanticResult.tokens``
+        (codec values, CODEC_OFFSET already removed) and the model composes onward
+        from that exact audio instead of starting fresh. The carried tokens are
+        reproduced verbatim at the head of the result.
+
+        ``sampling.max_tokens`` remains the budget for NEW tokens, not the total,
+        so a caller wanting a fixed final length subtracts ``len(carry)`` itself.
+        """
         if not isinstance(plan, SymbolicPlan):
             raise TypeError("Pass the SymbolicPlan returned by pipe.plan()")
         request = plan.request
         expected = token_prefixes(request, self.tokenizer, plan.abc_ids)
         if expected != plan.prefix:
             raise ValueError("Plan prefix disagrees with request/exact ABC IDs")
+        self._stage_boundary()
+        carried = [int(t) for t in (carry or [])]
+        if carried and not all(0 <= t < CODEC_SIZE for t in carried):
+            raise ValueError("carry must hold codec tokens with CODEC_OFFSET already removed")
+        carried_ids = [t + CODEC_OFFSET for t in carried]
         sampling = resolve_sampling(sampling, self.generation_config.semantic)
-        negative = negative_prefix(request, self.tokenizer, plan.abc_ids) if request.guidance != 1 else None
-        ids, timing, truncated = self._generate(plan.prefix, sampling, request.seed, "semantic",
+        negative = (negative_prefix(request, self.tokenizer, plan.abc_ids) + carried_ids
+                    if request.guidance != 1 else None)
+        ids, timing, truncated = self._generate(plan.prefix + carried_ids, sampling, request.seed, "semantic",
                         negative=negative, cfg_scale=request.guidance, legacy_off=request.cot == "off",
                         cancelled=cancelled, on_token=on_token)
-        return SemanticResult(plan, [int(t) - CODEC_OFFSET for t in ids], timing, truncated)
+        return SemanticResult(plan, carried + [int(t) - CODEC_OFFSET for t in ids], timing, truncated)
 
-    def synthesize(self, semantic, *, cancelled=None):
+    def synthesize(self, semantic, *, chunk_seconds=0.0, overlap_seconds=0.0,
+                   known_latents=None, blend_seconds=0.0, cancelled=None):
+        """Solve the acoustic stage.
+
+        ``known_latents`` are the latents of the take being continued, at 25
+        frames per second; they are returned verbatim rather than re-solved, and
+        ``blend_seconds`` crossfades out of them instead of cutting. ``chunk_seconds``
+        and ``overlap_seconds`` pin the acoustic chunk layout so a long song is
+        voiced like a short render of the same score. Pass nothing and this
+        behaves exactly as the release protocol.
+        """
         from .nar import synthesize
+        self._stage_boundary()
         if self.backend == "vllm":
             from .fast import close_vllm
             close_vllm(self)
@@ -300,6 +342,10 @@ class YuE2Pipeline:
             result = synthesize(model, semantic.plan.prefix, semantic.tokens,
                                 semantic.plan.request.seed, steps=self.generation_config.ode_steps,
                                 context=self.generation_config.context, offload_ar=self.offload_ar,
+                                chunk_frames=round(chunk_seconds * 25) or None,
+                                overlap_frames=round(overlap_seconds * 25),
+                                known_latents=known_latents,
+                                blend_frames=round(blend_seconds * 25),
                                 cancelled=cancelled, on_progress=report)
             return result.detach().float().cpu().numpy()
 
@@ -319,6 +365,7 @@ class YuE2Pipeline:
 
     def decode(self, latents, *, full=False, vae=None):
         from .modeling_vae import YuE2VAE
+        self._stage_boundary()
         with self._status("Loading audio decoder"):
             if self._model is not None:
                 self._model.to("cpu")
@@ -376,13 +423,14 @@ class YuE2Pipeline:
                 "validation_status": "unvalidated"}
 
     def __call__(self, style=None, lyrics=None, *, tags=None, abc_sampling=None,
-                 semantic_sampling=None, cancelled=None, on_token=None, **kwargs):
+                 semantic_sampling=None, carry=None, cancelled=None, on_token=None, **kwargs):
         request = self._request(style, lyrics, tags=tags, **kwargs)
         config = self.effective_config(request, abc_sampling, semantic_sampling)
         request_id = identity({"request": request.to_dict(), "config": config, "weights": self.weights})
         start = time.perf_counter()
         plan = self.plan(request=request, abc_sampling=abc_sampling, cancelled=cancelled, on_token=on_token)
-        semantic = self.generate_semantic(plan, sampling=semantic_sampling, cancelled=cancelled, on_token=on_token)
+        semantic = self.generate_semantic(plan, sampling=semantic_sampling, carry=carry,
+                                          cancelled=cancelled, on_token=on_token)
         nar_start = time.perf_counter()
         latents = self.synthesize(semantic, cancelled=cancelled)
         nar_seconds = time.perf_counter() - nar_start
