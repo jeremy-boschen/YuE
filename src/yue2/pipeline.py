@@ -268,6 +268,20 @@ class YuE2Pipeline:
         return SymbolicPlan(request, self.tokenizer.decode(ids), ids,
                             token_prefixes(request, self.tokenizer, ids), timing, truncated)
 
+    def _stage_boundary(self):
+        """Drain MPS allocator state between stages.
+
+        On Apple Silicon the semantic stage is sensitive to allocator state left
+        behind by the stage before it: planning on MPS and then generating in the
+        same process yields different tokens than generating from a clean pool,
+        which makes a take unreproducible. Draining and synchronising at every
+        stage boundary removes the dependency. A newer torch that happens to mask
+        the workload is not a reason to drop this.
+        """
+        if self.device.type == "mps":
+            torch.mps.empty_cache()
+            torch.mps.synchronize()
+
     def generate_semantic(self, plan, *, sampling=None, cancelled=None, on_token=None):
         if not isinstance(plan, SymbolicPlan):
             raise TypeError("Pass the SymbolicPlan returned by pipe.plan()")
@@ -275,6 +289,7 @@ class YuE2Pipeline:
         expected = token_prefixes(request, self.tokenizer, plan.abc_ids)
         if expected != plan.prefix:
             raise ValueError("Plan prefix disagrees with request/exact ABC IDs")
+        self._stage_boundary()
         sampling = resolve_sampling(sampling, self.generation_config.semantic)
         negative = negative_prefix(request, self.tokenizer, plan.abc_ids) if request.guidance != 1 else None
         ids, timing, truncated = self._generate(plan.prefix, sampling, request.seed, "semantic",
@@ -284,6 +299,7 @@ class YuE2Pipeline:
 
     def synthesize(self, semantic, *, cancelled=None):
         from .nar import synthesize
+        self._stage_boundary()
         if self.backend == "vllm":
             from .fast import close_vllm
             close_vllm(self)
@@ -319,6 +335,7 @@ class YuE2Pipeline:
 
     def decode(self, latents, *, full=False, vae=None):
         from .modeling_vae import YuE2VAE
+        self._stage_boundary()
         with self._status("Loading audio decoder"):
             if self._model is not None:
                 self._model.to("cpu")
