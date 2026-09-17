@@ -155,6 +155,10 @@ class YuE2Pipeline:
                             "vae": model_identity(self.vae_dir, verify_hashes)}
         self.runtime_sha256 = identity({p.name: sha256_file(p) for p in sorted(Path(__file__).parent.glob("*.py"))})
         self._model, self._vae = None, None
+        # Callables run whenever the AR/NAR model is ready for a stage; see _load_model.
+        # Adapters, quantization tweaks and instrumentation attach here instead of
+        # reaching into a private attribute that the pipeline may replace under them.
+        self.on_model_ready = []
         self.load_timing = {}
         if self.device.type == "cuda":
             if not torch.cuda.is_bf16_supported():
@@ -209,9 +213,22 @@ class YuE2Pipeline:
                    "generation_config": self.generation_config.to_dict(), "source_weights": self.weights})
 
     def _load_model(self, for_nar=False):
+        """Return the model, constructing or re-placing it if needed.
+
+        Every callable in ``on_model_ready`` is invoked as
+        ``hook(model, *, for_nar, fresh, loaded)`` before the model is handed to a
+        stage: ``fresh`` marks a newly constructed model, ``loaded`` marks a
+        construction or a move onto the device. It fires on every stage entry, not
+        only on construction, because the pipeline mutates the model in place
+        between stages (fp8 preparation for AR, restoration before NAR) and because
+        a stage-specific adapter has to know which stage it is about to serve.
+        Hooks must therefore be idempotent, and mutate the model in place; the
+        return value is ignored.
+        """
         loading = self._model is None or next(self._model.parameters()).device != self.device
         with self._status("Loading model") if loading else nullcontext():
-            if self._model is None:
+            fresh = self._model is None
+            if fresh:
                 from .modeling_yue2 import YuE2ForCausalLM
                 start = time.perf_counter()
                 self._model = YuE2ForCausalLM.from_pretrained(self.model_dir, local_files_only=True,
@@ -221,6 +238,8 @@ class YuE2Pipeline:
                 from .quantization import prepare_fp8_ar
                 prepare_fp8_ar(self._model, self.device)
             self._model.to(self.device)
+        for hook in self.on_model_ready:
+            hook(self._model, for_nar=for_nar, fresh=fresh, loaded=loading)
         return self._model
 
     def _request(self, style=None, lyrics=None, *, tags=None, **kwargs):
