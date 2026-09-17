@@ -53,9 +53,27 @@ def distribution(logits, sampling, history, step, phase, legacy_off=False):
     return scores
 
 
+def rng_device_for(device, choice="auto"):
+    """Resolve which device's RNG draws the tokens; see GenerationConfig.rng_device.
+
+    "auto" reproduces the released behaviour: the compute device on CPU and CUDA,
+    CPU everywhere else. CUDA and CPU generators are different algorithms, so a
+    seed only names a take within one RNG device, and "cpu" is what makes a take
+    portable across backends.
+    """
+    if choice in (None, "auto"):
+        return device if device.type in {"cpu", "cuda"} else torch.device("cpu")
+    if choice == "cpu":
+        return torch.device("cpu")
+    if choice == "device":
+        return device
+    raise ValueError("rng_device must be 'auto', 'cpu' or 'device'")
+
+
 @torch.inference_mode()
 def generate_tokens(model, prefix, sampling, seed, phase, negative=None, cfg_scale=1.0,
-                    legacy_off=False, cancelled=None, on_token=None, use_cuda_graph=True):
+                    legacy_off=False, cancelled=None, on_token=None, use_cuda_graph=True,
+                    rng_device=None):
     from .modeling_yue2 import StaticKVCache
     device = next(model.parameters()).device
     dtype = next(model.parameters()).dtype
@@ -68,8 +86,8 @@ def generate_tokens(model, prefix, sampling, seed, phase, negative=None, cfg_sca
     if cancelled is not None and cancelled():
         raise InterruptedError("Cancelled before prefill")
     # The two stages deliberately reset their request-local seed, matching the preset.
-    rng_device = device if device.type in {"cpu", "cuda"} else torch.device("cpu")
-    generator = torch.Generator(device=rng_device).manual_seed(seed)
+    rng = rng_device_for(device, rng_device)
+    generator = torch.Generator(device=rng).manual_seed(seed)
     config = model.config
 
     def prefill(ids):
@@ -112,8 +130,12 @@ def generate_tokens(model, prefix, sampling, seed, phase, negative=None, cfg_sca
                 next_id = scores.argmax(-1, keepdim=True)
             else:
                 probabilities = scores.softmax(-1)
-                if device.type == "mps":
-                    next_id = torch.multinomial(probabilities.cpu(), 1, generator=generator).to(device)
+                # torch requires the generator to sit on the sampled tensor's device.
+                # Moving a probability vector between devices is an exact copy, so this
+                # changes which stream draws the token and nothing else. Under "auto"
+                # this is the MPS case the release shipped.
+                if rng != device:
+                    next_id = torch.multinomial(probabilities.to(rng), 1, generator=generator).to(device)
                 else:
                     next_id = torch.multinomial(probabilities, 1, generator=generator)
             token = int(next_id.item())

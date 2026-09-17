@@ -267,7 +267,9 @@ class YuE2Pipeline:
                 result = generate_vllm(self, prefix, sampling, seed, phase, on_token=observed, **kwargs)
             else:
                 result = generate_tokens(model, prefix, sampling, seed, phase,
-                                         use_cuda_graph=self.backend != "torch-eager", on_token=observed, **kwargs)
+                                         use_cuda_graph=self.backend != "torch-eager",
+                                         rng_device=self.generation_config.rng_device,
+                                         on_token=observed, **kwargs)
             if result[2]:
                 status.finish(status="truncated")
             return result

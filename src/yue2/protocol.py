@@ -49,10 +49,20 @@ class GenerationConfig:
     ode_method: str = "midpoint"
     context: int = CONTEXT
     version: str = PROTOCOL_VERSION
+    # Which device's RNG draws the tokens.
+    #   "auto"   the released behaviour: the compute device on CPU and CUDA, CPU elsewhere
+    #   "cpu"    always the CPU stream, so one seed names one take on every backend
+    #   "device" always the compute device's stream
+    # CUDA and CPU use different generator algorithms, so a seed only names a take
+    # within one RNG device; "cpu" is what makes a take portable. Ignored by the vllm
+    # backend, which samples inside vLLM rather than through this generator.
+    rng_device: str = "auto"
 
     def __post_init__(self):
         if self.context != CONTEXT or self.ode_method != "midpoint" or type(self.ode_steps) is not int or self.ode_steps < 1:
             raise ValueError("Require context=24576 and midpoint with positive integer steps")
+        if self.rng_device not in {"auto", "cpu", "device"}:
+            raise ValueError("rng_device must be 'auto', 'cpu' or 'device'")
 
     def to_dict(self):
         return asdict(self)

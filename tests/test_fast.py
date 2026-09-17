@@ -13,7 +13,7 @@ from safetensors.torch import save_file, load_file
 
 from yue2 import fast
 from yue2 import quantization as quant
-from yue2.protocol import Sampling
+from yue2.protocol import GenerationConfig, Sampling
 from yue2.modeling_yue2 import YuE2Config, YuE2ForCausalLM
 
 
@@ -77,7 +77,8 @@ def test_full_context_kv_budget():
 def test_cfg_and_device_fallback_preserve_protocol(monkeypatch, cfg, legacy, reason):
     from yue2 import sampling
     calls, model = [], object()
-    pipe = SimpleNamespace(device=torch.device("cpu"), quantization="none", _load_model=lambda: model)
+    pipe = SimpleNamespace(device=torch.device("cpu"), quantization="none", _load_model=lambda: model,
+                           generation_config=GenerationConfig())
     prefix, negative = [1, 2], [3]
     sample = Sampling(max_tokens=4, min_tokens=0)
     def generate(*args, **kwargs):

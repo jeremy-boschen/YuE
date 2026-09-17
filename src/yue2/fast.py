@@ -313,6 +313,7 @@ def generate_vllm(pipe, prefix, sampling, seed, phase, negative=None, cfg_scale=
         close_vllm(pipe)
         ids, timing, truncated = generate_tokens(pipe._load_model(), prefix, sampling, seed, phase,
                     negative=negative, cfg_scale=cfg_scale, legacy_off=legacy_off,
+                    rng_device=pipe.generation_config.rng_device,
                     cancelled=cancelled, on_token=on_token)
         timing.update(backend_actual="torch", backend_requested="vllm", fallback_reason=reason)
         return ids, timing, truncated
