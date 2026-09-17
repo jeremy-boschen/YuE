@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -245,3 +246,50 @@ def test_offload_restores_modules_when_generation_raises(monkeypatch):
             assert all(module.device.type == "cpu" for module in modules)
             raise RuntimeError("request failed")
     assert all(module.moves == ["cpu", "meta"] for module in modules)
+
+
+# --- carrying a previous take's latents -------------------------------------
+
+@pytest.fixture
+def tiny_vocab(monkeypatch):
+    """The fixture model has vocab_size=32, so the real codec offsets do not fit."""
+    monkeypatch.setattr(nar, "CODEC_OFFSET", 8)
+    monkeypatch.setattr(nar, "MUSIC_END", 7)
+
+
+def _carry_case(model, carried_frames=4, total_frames=11):
+    """A take of `total_frames` whose leading `carried_frames` come from earlier."""
+    base = nar.synthesize(model, [2, 3], [1] * total_frames, 42, steps=2, context=15)
+    return base, base[:carried_frames]
+
+
+def test_known_latents_accepts_numpy_because_that_is_what_synthesize_returns(model, tiny_vocab):
+    # synthesize() hands back CPU numpy, so numpy is what a caller holds when
+    # continuing a take. Rejecting it made the round trip impossible.
+    base, carried = _carry_case(model)
+    result = nar.synthesize(model, [2, 3], [1] * 11, 42, steps=2, context=15,
+                            known_latents=np.asarray(carried))
+    assert result.shape == base.shape
+
+
+def test_numpy_and_tensor_carry_agree(model, tiny_vocab):
+    base, carried = _carry_case(model)
+    from_tensor = nar.synthesize(model, [2, 3], [1] * 11, 42, steps=2, context=15,
+                                 known_latents=torch.as_tensor(carried))
+    from_numpy = nar.synthesize(model, [2, 3], [1] * 11, 42, steps=2, context=15,
+                                known_latents=np.asarray(carried))
+    assert torch.equal(torch.as_tensor(from_tensor), torch.as_tensor(from_numpy))
+
+
+def test_carried_frames_are_returned_verbatim(model, tiny_vocab):
+    # The point of carrying: those frames are not re-solved.
+    base, carried = _carry_case(model, carried_frames=4)
+    result = nar.synthesize(model, [2, 3], [1] * 11, 42, steps=2, context=15,
+                            known_latents=carried)
+    assert torch.allclose(torch.as_tensor(result[:4]), torch.as_tensor(carried), atol=0, rtol=0)
+
+
+def test_misshapen_known_latents_are_rejected_before_the_model_sees_them(model, tiny_vocab):
+    for bad in (np.zeros((4,), dtype=np.float32), np.zeros((4, 63), dtype=np.float32)):
+        with pytest.raises(ValueError, match="known_latents must be shaped"):
+            nar.synthesize(model, [2, 3], [1] * 11, 42, steps=2, context=15, known_latents=bad)

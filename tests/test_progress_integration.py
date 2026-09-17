@@ -128,10 +128,15 @@ def test_pipeline_passes_acoustic_callbacks_only_when_enabled(enabled, monkeypat
     expected = torch.arange(128, dtype=torch.float32).reshape(2, 64)
     seen = []
 
-    def synthesize(model, prefix, tokens, seed, *, steps, context, offload_ar, cancelled, on_progress):
+    def synthesize(model, prefix, tokens, seed, *, steps, context, offload_ar, cancelled,
+                   on_progress, chunk_frames=None, overlap_frames=0, known_latents=None,
+                   blend_frames=0):
         seen.append(on_progress is not None)
         assert steps == pipe.generation_config.ode_steps and context == pipe.generation_config.context
         assert tokens == [1, 2] and seed == 42 and offload_ar is False
+        # Acoustic levers default to the release protocol: one full-song chunk,
+        # nothing carried, no crossfade.
+        assert (chunk_frames, overlap_frames, known_latents, blend_frames) == (None, 0, None, 0)
         if on_progress is not None:
             on_progress(1, steps)
             on_progress(steps, steps)

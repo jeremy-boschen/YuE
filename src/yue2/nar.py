@@ -22,6 +22,7 @@ class Chunk:
     ar_tokens: list[int]
     noise: torch.Tensor
     nar_cond_end: int = 0
+    lead: int = 0          # leading frames already solved, pinned during the ODE
 
 
 def _integers(values, name):
@@ -31,7 +32,8 @@ def _integers(values, name):
     return [int(v) for v in result]
 
 
-def song_chunks(prefix, codec, seed, context=CONTEXT):
+def song_chunks(prefix, codec, seed, context=CONTEXT, chunk_frames=None,
+                overlap_frames=0, known_frames=0):
     """Draw the complete noise tensor once, then take views at historical cuts."""
     prefix = _integers(prefix, "prefix")
     codec = _integers(codec, "codec")
@@ -42,10 +44,37 @@ def song_chunks(prefix, codec, seed, context=CONTEXT):
     if isinstance(context, bool) or not isinstance(context, Integral) or not 1 <= context <= CONTEXT:
         raise ValueError(f"context must be an integer in 1..{CONTEXT}")
     ranges = chunk_ranges(len(codec), len(prefix), int(context))
+    if chunk_frames:
+        # Pin the chunk length so a longer song is voiced exactly like a short
+        # render of the same score: same prefix, same tokens, same noise view.
+        size = int(chunk_frames)
+        limit = ranges[0][1] - ranges[0][0] if len(ranges) == 1 else (int(context) - len(prefix) - 3) // 2
+        if not 1 <= size <= max(limit, 1):
+            raise ValueError(f"chunk_frames must be 1..{max(limit, 1)} for this prefix")
+        ranges = [(a, min(a + size, len(codec))) for a in range(0, len(codec), size)]
+    known = max(0, int(known_frames))
+    lead = max(0, int(overlap_frames))
+    if lead or known:
+        # Widen every chunk after the first to the left. Those frames are already
+        # solved, so they enter the ODE pinned to their known values and give the
+        # new frames real audio to continue from instead of silence.
+        room = (int(context) - len(prefix) - 3) // 2
+        widened = []
+        for index, (a, b) in enumerate(ranges):
+            # Carried frames already sit at the head of the first range, so it is
+            # pinned in place. Later chunks must reach back before their start.
+            if index == 0:
+                widened.append((a, b, min(known, b - a)))
+            else:
+                take = min(lead, a, max(0, room - (b - a)))
+                widened.append((a - take, b, take))
+        ranges = widened
+    else:
+        ranges = [(a, b, 0) for a, b in ranges]
     generator = torch.Generator(device="cpu").manual_seed(int(seed))
     noise = torch.randn((len(codec), 64), dtype=torch.float32, device="cpu", generator=generator)
-    return [Chunk(prefix + [value + CODEC_OFFSET for value in codec[a:b]] + [MUSIC_END], noise[a:b])
-            for a, b in ranges]
+    return [Chunk(prefix + [value + CODEC_OFFSET for value in codec[a:b]] + [MUSIC_END], noise[a:b], 0, take)
+            for a, b, take in ranges]
 
 
 def attention(q, k, v, *, causal=False, backend="sdpa", query_chunk_size=None):
@@ -102,9 +131,10 @@ def attention(q, k, v, *, causal=False, backend="sdpa", query_chunk_size=None):
 class CachedNAR:
     """One original acoustic chunk; AR prefix KV is invariant during the ODE."""
 
-    def __init__(self, model, chunk: Chunk, attention="sdpa", query_chunk_size=None):
+    def __init__(self, model, chunk: Chunk, attention="sdpa", query_chunk_size=None, known=None):
         self.model, self.chunk = model, chunk
         self.backend, self.query_chunk_size = attention, query_chunk_size
+        self.known = None
         weight = next(model.vae2llm.parameters())
         self.device, self.dtype = weight.device, weight.dtype
         if chunk.noise.ndim != 2 or chunk.noise.shape[1] != 64 or len(chunk.noise) < 1:
@@ -123,6 +153,12 @@ class CachedNAR:
         self.cos, self.sin = model.model.rotary_emb(positions)
         local = torch.arange(self.nar_length, device=self.device).clamp(max=model.config.max_latent_frames - 1)
         self.pos_emb = model.latent_pos_embed(local)[None]
+        if known is not None:
+            if known.ndim != 2 or known.shape[1] != 64 or not len(known) or len(known) > len(chunk.noise):
+                raise ValueError("Leading context must be latents shaped [n,64] with n <= chunk frames")
+            if not torch.isfinite(known).all():
+                raise ValueError("Leading context contains non-finite values")
+            self.known = known.to(device=self.device, dtype=self.dtype)
         self.cache = []
         self._prefill()
 
@@ -177,7 +213,18 @@ class CachedNAR:
         """
         if isinstance(steps, bool) or not isinstance(steps, Integral) or steps < 1:
             raise ValueError("steps must be a positive integer")
-        state = self.chunk.noise.to(device=self.device, dtype=self.dtype)
+        noise = self.chunk.noise.to(device=self.device, dtype=self.dtype)
+        keep = len(self.known) if self.known is not None else 0
+
+        def pin(x, t):
+            """Hold the known frames on the flow path x_t = t*noise + (1-t)*data."""
+            if not keep:
+                return x
+            x = x.clone()
+            x[:keep] = t * noise[:keep] + (1.0 - t) * self.known
+            return x
+
+        state = pin(noise, 1.0) if keep else noise
         dt = 1.0 / steps
         for step in range(steps):
             if cancelled is not None and cancelled():
@@ -185,11 +232,11 @@ class CachedNAR:
             t = 1.0 - step * dt
             raw = torch.logit(torch.tensor(t, dtype=torch.float64, device="cpu")).clamp(-20, 20).item()
             first = self.velocity(state, raw)
-            mid = state - first * (dt / 2)
+            mid = pin(state - first * (dt / 2), t - dt / 2)
             if cancelled is not None and cancelled():
                 raise InterruptedError("Cancelled during acoustic flow matching")
             raw_mid = torch.logit(torch.tensor(t - dt / 2, dtype=torch.float64, device="cpu")).clamp(-20, 20).item()
-            state = state - self.velocity(mid, raw_mid) * dt
+            state = pin(state - self.velocity(mid, raw_mid) * dt, max(0.0, t - dt))
             if on_progress is not None:
                 on_progress(step + 1, int(steps))
         result = state.float().cpu()
@@ -227,12 +274,18 @@ def _offload_ar(model, enabled):
 @torch.inference_mode()
 def synthesize(model, prefix: Sequence[int], codec: Sequence[int], seed: int,
                steps=32, context=CONTEXT, attention="sdpa", offload_ar=False,
-               cancelled=None, query_chunk_size=None,
+               cancelled=None, query_chunk_size=None, chunk_frames=None, overlap_frames=0,
+               known_latents=None, blend_frames=0,
                on_progress: Callable[[int, int], None] | None = None):
     """Return CPU FP32 [frames,64] latents, solving original chunks serially.
 
-    Defaults preserve the release protocol. Explicit steps/context overrides
-    belong in the caller's effective configuration record. ``offload_ar`` is
+    Defaults preserve the release protocol, including the single full-song chunk
+    layout: pass nothing and this behaves exactly as before. ``chunk_frames`` and
+    ``overlap_frames`` pin the chunk length so a long song is voiced like a short
+    render of the same score. ``known_latents`` are the leading frames of an
+    earlier take, never re-solved: they enter the first chunk pinned, so new
+    frames are composed against real audio, and ``blend_frames`` crossfades out of
+    the carried take instead of cutting. Explicit steps/context overrides ``offload_ar`` is
     an optional memory tradeoff and requires exclusive access to ``model``.
     Progress counts submitted midpoint steps across all original chunks; it
     introduces no device synchronization. Callback exceptions propagate after
@@ -240,12 +293,34 @@ def synthesize(model, prefix: Sequence[int], codec: Sequence[int], seed: int,
     """
     if model.training:
         raise ValueError("synthesize requires model.eval()")
-    chunks = song_chunks(prefix, codec, seed, context)
+    if known_latents is not None:
+        # This function returns CPU numpy, so numpy is what a caller has to hand
+        # when continuing a take. Accept it, and make the carried frames a tensor
+        # once here rather than leaving the first chunk holding whatever was
+        # passed while later chunks hold a torch.cat result.
+        known_latents = torch.as_tensor(known_latents)
+        if known_latents.ndim != 2 or known_latents.shape[1] != 64:
+            raise ValueError("known_latents must be shaped [frames,64]")
+    carried = 0 if known_latents is None else len(known_latents)
+    chunks = song_chunks(prefix, codec, seed, context, chunk_frames=chunk_frames,
+                         overlap_frames=overlap_frames, known_frames=carried)
     output = []
     for chunk_index, chunk in enumerate(chunks):
         if cancelled is not None and cancelled():
             raise InterruptedError("Cancelled before acoustic prefill")
-        engine = CachedNAR(model, chunk, attention, query_chunk_size)
+        known = None
+        blend = 0
+        if chunk_index == 0 and carried:
+            # Hard-pin everything but the last `blend` frames. Those are solved
+            # freely so the model writes its own way out of the carried audio,
+            # then the output crossfades from the take into that solution.
+            blend = max(0, min(int(blend_frames), chunk.lead - 1))
+            known = known_latents[:chunk.lead - blend]
+        elif chunk.lead and output:
+            known = torch.cat(output, dim=0)[-chunk.lead:]
+            if len(known) != chunk.lead:
+                known = None
+        engine = CachedNAR(model, chunk, attention, query_chunk_size, known)
         # Drop the prefix cache before restoring AR weights, including on
         # cancellation/failure, to keep the restoration memory peak bounded.
         with _offload_ar(model, offload_ar):
@@ -254,8 +329,16 @@ def synthesize(model, prefix: Sequence[int], codec: Sequence[int], seed: int,
                 if on_progress is not None:
                     def progress(completed, total):
                         on_progress(chunk_index * total + completed, total * len(chunks))
-                output.append(engine.solve(steps, cancelled, on_progress=progress))
+                solved = engine.solve(steps, cancelled, on_progress=progress)
             finally:
                 engine.close()
         del engine
+        if chunk_index == 0 and carried:
+            head = chunk.lead - blend
+            output.append(known_latents[:head].to(solved.dtype))
+            if blend:
+                ramp = torch.linspace(1.0, 0.0, blend, dtype=solved.dtype).unsqueeze(1)
+                tail = known_latents[head:chunk.lead].to(solved.dtype)
+                output.append(ramp * tail + (1.0 - ramp) * solved[head:chunk.lead])
+        output.append(solved[chunk.lead:] if known is not None else solved)
     return torch.cat(output, dim=0)

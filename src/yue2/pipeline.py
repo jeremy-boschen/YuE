@@ -313,7 +313,17 @@ class YuE2Pipeline:
                         cancelled=cancelled, on_token=on_token)
         return SemanticResult(plan, carried + [int(t) - CODEC_OFFSET for t in ids], timing, truncated)
 
-    def synthesize(self, semantic, *, cancelled=None):
+    def synthesize(self, semantic, *, chunk_seconds=0.0, overlap_seconds=0.0,
+                   known_latents=None, blend_seconds=0.0, cancelled=None):
+        """Solve the acoustic stage.
+
+        ``known_latents`` are the latents of the take being continued, at 25
+        frames per second; they are returned verbatim rather than re-solved, and
+        ``blend_seconds`` crossfades out of them instead of cutting. ``chunk_seconds``
+        and ``overlap_seconds`` pin the acoustic chunk layout so a long song is
+        voiced like a short render of the same score. Pass nothing and this
+        behaves exactly as the release protocol.
+        """
         from .nar import synthesize
         self._stage_boundary()
         if self.backend == "vllm":
@@ -332,6 +342,10 @@ class YuE2Pipeline:
             result = synthesize(model, semantic.plan.prefix, semantic.tokens,
                                 semantic.plan.request.seed, steps=self.generation_config.ode_steps,
                                 context=self.generation_config.context, offload_ar=self.offload_ar,
+                                chunk_frames=round(chunk_seconds * 25) or None,
+                                overlap_frames=round(overlap_seconds * 25),
+                                known_latents=known_latents,
+                                blend_frames=round(blend_seconds * 25),
                                 cancelled=cancelled, on_progress=report)
             return result.detach().float().cpu().numpy()
 
