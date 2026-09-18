@@ -73,7 +73,7 @@ def rng_device_for(device, choice="auto"):
 @torch.inference_mode()
 def generate_tokens(model, prefix, sampling, seed, phase, negative=None, cfg_scale=1.0,
                     legacy_off=False, cancelled=None, on_token=None, use_cuda_graph=True,
-                    rng_device=None):
+                    rng_device=None, prior=None):
     from .modeling_yue2 import StaticKVCache
     device = next(model.parameters()).device
     dtype = next(model.parameters()).dtype
@@ -119,13 +119,14 @@ def generate_tokens(model, prefix, sampling, seed, phase, negative=None, cfg_sca
         synchronize(device)
         prefill_seconds = time.perf_counter() - start
         history, first, eos = [], None, False
+        window = list(prior or [])[-sampling.penalty_window:]
         end = ABC_END if phase == "abc" else MUSIC_END
         for step in range(sampling.max_tokens):
             if cancelled is not None and cancelled():
                 raise InterruptedError(f"Cancelled during {phase}")
             # Preserve historical BF16 CFG subtraction/multiply/add before upcast.
             logits = conditional if cfg_scale == 1.0 else unconditional + cfg_scale * (conditional - unconditional)
-            scores = distribution(logits, sampling, history, step, phase, legacy_off)
+            scores = distribution(logits, sampling, window, step, phase, legacy_off)
             if sampling.temperature == 0:
                 next_id = scores.argmax(-1, keepdim=True)
             else:
@@ -147,6 +148,9 @@ def generate_tokens(model, prefix, sampling, seed, phase, negative=None, cfg_sca
                 eos = True
                 break
             history.append(token)
+            window.append(token)
+            if len(window) > sampling.penalty_window:
+                del window[:-sampling.penalty_window]
             if step + 1 < sampling.max_tokens:
                 if graph is not None:
                     branch_logits = graph.step(next_id)

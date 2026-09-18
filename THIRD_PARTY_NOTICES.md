@@ -14,3 +14,9 @@ These notices cover the identified source code and retain its original licenses.
 The YuE2 model checkpoint weights are separately licensed under CC BY-NC 4.0,
 with additional permission for individual creators; see MODEL_LICENSE for
 academic-use terms, scope and full terms. This does not relicense third-party code.
+
+## ComfyUI YuE2 MPS profile
+
+See `src/yue2/profiles/vendor/README.md` for source revisions and modifications,
+and its bundled MIT notices for the standalone Metal RMSNorm and attention gates.
+The continuation-history adaptation retains the YuE2 authors' Apache-2.0 attribution.

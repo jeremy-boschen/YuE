@@ -77,7 +77,7 @@ def song_chunks(prefix, codec, seed, context=CONTEXT, chunk_frames=None,
             for a, b, take in ranges]
 
 
-def attention(q, k, v, *, causal=False, backend="sdpa", query_chunk_size=None):
+def attention(q, k, v, *, causal=False, backend="sdpa", query_chunk_size=None, operation=None):
     """Attend [tokens, heads, dim] tensors without materializing a song mask.
 
     CPU/MPS bound the number of query rows for a potential math SDPA fallback.
@@ -121,7 +121,7 @@ def attention(q, k, v, *, causal=False, backend="sdpa", query_chunk_size=None):
             if causal and start:
                 mask = (torch.arange(end, device=q.device)[None, :] <=
                         torch.arange(start, end, device=q.device)[:, None])
-            outputs.append(F.scaled_dot_product_attention(
+            outputs.append((operation or F.scaled_dot_product_attention)(
                 query[..., start:end, :], used_key, used_value,
                 attn_mask=mask, is_causal=causal and start == 0, enable_gqa=grouped,
             ))
@@ -163,7 +163,8 @@ class CachedNAR:
         self._prefill()
 
     def _attention(self, q, k, v, causal=False):
-        return attention(q, k, v, causal=causal, backend=self.backend, query_chunk_size=self.query_chunk_size)
+        return attention(q, k, v, causal=causal, backend=self.backend, query_chunk_size=self.query_chunk_size,
+                         operation=self.model.profile.nar_attention if getattr(self.model, "profile", None) else None)
 
     @torch.inference_mode()
     def _prefill(self):

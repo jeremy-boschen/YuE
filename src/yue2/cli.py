@@ -32,6 +32,7 @@ def get_pipe(args):
     return YuE2Pipeline.from_pretrained(model, vae=vae, revision=args.revision,
              vae_revision=args.vae_revision, device=args.device, memory_budget_gib=args.budget,
              backend=args.backend, quantization=args.quantization, offload_ar=args.offload_ar,
+             **({"profile": args.profile} if args.profile else {}),
              local_files_only=args.offline, generation_config=config,
              vae_core_frames=512 if args.budget <= 12 else 1024,
              progress=not getattr(args, "quiet", False))
@@ -194,6 +195,7 @@ def parser():
         q.add_argument("--vae-revision")
         q.add_argument("--device", default="auto")
         q.add_argument("--budget", type=float, default=24)
+        q.add_argument("--profile", choices=("official", "comfyui-yue2-mps-v1"), default=None)
         q.add_argument("--backend", choices=("torch", "torch-eager", "vllm"), default="torch")
         q.add_argument("--quantization", choices=("none", "fp8"), default="none")
         q.add_argument("--offload-ar", action="store_true")

@@ -1,0 +1,11 @@
+{
+  "comfyui": "02d39c8cd7828566f48ccf783c1c75b8336044f5",
+  "fl_yue2": "16d0c0f8ec4f26a38a1e9a232307641672104e81",
+  "apple_silicon_fp8": "74734a108eb1640c24e131ee088b995ff962c47f",
+  "hardware": "Apple M5 Pro",
+  "macos": "26.6.2",
+  "torch": "2.14.0",
+  "torch_git": "08187d9e0fba026dc8217405802ab5381dc88d90",
+  "mtlflashattn": "0.2.0",
+  "launch_flags": ["--use-pytorch-cross-attention", "--disable-smart-memory", "--reserve-vram", "8"]
+}

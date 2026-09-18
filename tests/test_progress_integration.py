@@ -21,6 +21,8 @@ class Tokenizer:
 
 def bare_pipe(enabled=True, backend='torch-eager'):
     pipe = object.__new__(YuE2Pipeline)
+    from yue2.profiles import OfficialProfile
+    pipe._profile = OfficialProfile()
     pipe.progress, pipe.backend = enabled, backend
     pipe.tokenizer = Tokenizer()
     pipe.generation_config = GenerationConfig()

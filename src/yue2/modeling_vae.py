@@ -132,7 +132,7 @@ class EncoderBlock(nn.Module):
 
 
 class DecoderBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, stride, act_type):
+    def __init__(self, in_channels, out_channels, stride, act_type, profile=None):
         super().__init__()
         upsample_layer = WNConvTranspose1d(
             in_channels=in_channels,
@@ -140,6 +140,7 @@ class DecoderBlock(nn.Module):
             kernel_size=2 * stride,
             stride=stride,
             padding=math.ceil(stride / 2),
+            output_padding=profile.decoder_output_padding(stride) if profile else 0,
         )
         self.layers = nn.Sequential(
             get_activation(act_type, channels=in_channels),
@@ -219,6 +220,7 @@ class OobleckDecoder(nn.Module):
         use_nearest_upsample=False,
         use_filter=False,
         final_tanh=True,
+        profile=None,
     ):
         super().__init__()
         if antialias_activation or use_nearest_upsample or use_filter:
@@ -244,6 +246,7 @@ class OobleckDecoder(nn.Module):
                     out_channels=c_mults[i - 1] * channels,
                     stride=strides[i - 1],
                     act_type=act_type,
+                    profile=profile,
                 )
             )
         layers.extend(
@@ -383,17 +386,17 @@ class YuE2VAE(PreTrainedModel):
     base_model_prefix = ""
     main_input_name = "audio"
 
-    def __init__(self, config, decoder_only=False):
+    def __init__(self, config, decoder_only=False, profile=None):
         super().__init__(config)
         self.decoder_only = bool(decoder_only)
         if not self.decoder_only:
             self.encoder = OobleckEncoder(**config.encoder_config)
-        self.decoder = OobleckDecoder(**config.decoder_config)
+        self.decoder = OobleckDecoder(**config.decoder_config, profile=profile)
         self.eval().requires_grad_(False)
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args,
-                        config=None, decoder_only=False, device="cpu",
+                        config=None, decoder_only=False, device="cpu", profile=None,
                         torch_dtype=None, dtype=None, revision=None, token=None,
                         cache_dir=None, local_files_only=False,
                         force_download=False, subfolder="", **kwargs):
@@ -436,7 +439,7 @@ class YuE2VAE(PreTrainedModel):
         path = path / subfolder
         if config is None:
             config = YuE2VAEConfig.from_pretrained(path, local_files_only=True)
-        model = cls(config, decoder_only=decoder_only)
+        model = cls(config, decoder_only=decoder_only, profile=profile)
         index = path / "model.safetensors.index.json"
         if index.exists():
             mapping = json.loads(index.read_text())["weight_map"]

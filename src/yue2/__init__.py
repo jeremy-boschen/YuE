@@ -1,5 +1,5 @@
 """YuE2 song generation. Optional backends are imported only when requested."""
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 
 
 def __getattr__(name):
@@ -12,4 +12,7 @@ def __getattr__(name):
     if name in {"YuE2VAE", "YuE2VAEConfig"}:
         from . import modeling_vae
         return getattr(modeling_vae, name)
+    if name in {"NumericalProfile", "OfficialProfile", "ComfyUIYuE2MPSProfile"}:
+        from . import profiles
+        return getattr(profiles, name)
     raise AttributeError(name)

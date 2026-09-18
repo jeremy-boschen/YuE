@@ -290,3 +290,11 @@ The YuE2 technical report is coming soon. For now, please cite **[MERT](https://
 - **Licensing inquiries:** [lauryliuyang@hkgai.org](mailto:lauryliuyang@hkgai.org)
 - **Data partnerships:** [gezhang@umich.edu](mailto:gezhang@umich.edu)
 - **Academic collaboration:** [ryuanab@connect.ust.hk](mailto:ryuanab@connect.ust.hk)
+
+### Numerical profiles
+
+The default `official` profile preserves released engine behavior. An explicit
+`comfyui-yue2-mps-v1` profile supplies instance-owned operations for the frozen
+ComfyUI YuE2 Apple Silicon runtime, without ComfyUI packages or runtime patches.
+See [Numerical profiles](docs/NUMERICAL_PROFILES.md) for the API, requirements,
+caller-supplied profiles and compatibility scope.

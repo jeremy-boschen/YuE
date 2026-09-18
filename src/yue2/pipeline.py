@@ -122,7 +122,7 @@ class SongResult:
 class YuE2Pipeline:
     def __init__(self, model_dir, vae_dir, *, device="auto", memory_budget_gib=24,
                  backend="torch", generation_config=None, verify_hashes=True,
-                 vae_core_frames=None, quantization="none", offload_ar=False, progress=True):
+                 vae_core_frames=None, quantization="none", offload_ar=False, progress=True, profile="official"):
         if not isinstance(progress, bool):
             raise TypeError("progress must be True or False")
         self.progress = progress
@@ -135,6 +135,12 @@ class YuE2Pipeline:
         if device == "auto":
             device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
         self.device = torch.device(device)
+        from .profiles import resolve_profile, OfficialProfile
+        self._profile = resolve_profile(profile)
+        if backend == "vllm" and type(self.profile) is not OfficialProfile:
+            raise ValueError("vLLM supports only the official profile")
+        self._profile.validate(self.device, backend=backend, quantization=quantization,
+                               rng_device=(generation_config or GenerationConfig()).rng_device)
         if self.device.type == "cuda" and self.device.index is None:
             self.device = torch.device("cuda", torch.cuda.current_device())
         torch.backends.cudnn.benchmark = False
@@ -153,7 +159,9 @@ class YuE2Pipeline:
         with self._status("Verifying model files"):
             self.weights = {"mot": model_identity(self.model_dir, verify_hashes),
                             "vae": model_identity(self.vae_dir, verify_hashes)}
-        self.runtime_sha256 = identity({p.name: sha256_file(p) for p in sorted(Path(__file__).parent.glob("*.py"))})
+        self.runtime_sha256 = identity({str(p.relative_to(Path(__file__).parent)): sha256_file(p)
+                                       for p in sorted(Path(__file__).parent.rglob("*"))
+                                       if p.suffix in (".py", ".json")})
         self._model, self._vae = None, None
         # Callables run whenever the AR/NAR model is ready for a stage; see _load_model.
         # Adapters, quantization tweaks and instrumentation attach here instead of
@@ -168,6 +176,10 @@ class YuE2Pipeline:
             if budget <= 0:
                 raise ValueError("Memory budget must leave room for a 2GiB reserve")
             torch.cuda.set_per_process_memory_fraction(min(budget / total, 1), self.device)
+
+    @property
+    def profile(self):
+        return self._profile
 
     @classmethod
     def from_pretrained(cls, model="m-a-p/YuE2-3B", *, vae="m-a-p/YuE2-Vae",
@@ -185,11 +197,20 @@ class YuE2Pipeline:
             if vae == "m-a-p/YuE2-Vae":
                 vae = parent / metadata["vae"]
             kwargs.setdefault("generation_config", GenerationConfig.from_dict(metadata["generation_config"]))
+            saved_profile = metadata.get("profile", {"name": "official"})
+            if "profile" not in kwargs:
+                kwargs["profile"] = saved_profile["name"]
+            else:
+                from .profiles import resolve_profile
+                if "profile" in metadata and resolve_profile(kwargs["profile"]).identity() != saved_profile:
+                    raise ValueError("Supplied profile differs from saved pipeline profile")
         hub = dict(local_files_only=local_files_only, token=token, cache_dir=cache_dir)
         with Progress(enabled=progress).stage("Resolving model files"):
             model_path = resolve_model(model, revision=revision, **hub)
             vae_path = resolve_model(vae, revision=vae_revision, **hub)
         result = cls(model_path, vae_path, progress=progress, **kwargs)
+        if saved.is_file() and "profile" in metadata and result.profile.identity() != metadata["profile"]:
+            raise ValueError("Loaded profile identity differs from saved pipeline profile")
         result.load_timing["resolve_and_integrity_seconds"] = time.perf_counter() - start
         return result
 
@@ -210,7 +231,8 @@ class YuE2Pipeline:
                 continue
             copy_model_files(source, destination)
         write_json(directory / "pipeline.json", {"model": "YuE2-3B", "vae": "YuE2-Vae",
-                   "generation_config": self.generation_config.to_dict(), "source_weights": self.weights})
+                   "generation_config": self.generation_config.to_dict(), "source_weights": self.weights,
+                   "profile": self.profile.identity()})
 
     def _load_model(self, for_nar=False):
         """Return the model, constructing or re-placing it if needed.
@@ -232,7 +254,7 @@ class YuE2Pipeline:
                 from .modeling_yue2 import YuE2ForCausalLM
                 start = time.perf_counter()
                 self._model = YuE2ForCausalLM.from_pretrained(self.model_dir, local_files_only=True,
-                              torch_dtype=torch.bfloat16, low_cpu_mem_usage=True).eval()
+                              torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, profile=self.profile).eval()
                 self.load_timing["mot_load_seconds"] = time.perf_counter() - start
             if self.quantization == "fp8" and not for_nar:
                 from .quantization import prepare_fp8_ar
@@ -266,9 +288,10 @@ class YuE2Pipeline:
                 from .fast import generate_vllm
                 result = generate_vllm(self, prefix, sampling, seed, phase, on_token=observed, **kwargs)
             else:
+                from .profiles import OfficialProfile
                 result = generate_tokens(model, prefix, sampling, seed, phase,
-                                         use_cuda_graph=self.backend != "torch-eager",
-                                         rng_device=self.generation_config.rng_device,
+                                         use_cuda_graph=self.backend != "torch-eager" and type(self.profile) is OfficialProfile,
+                                         rng_device=self.profile.sampling_rng_device(self.generation_config.rng_device),
                                          on_token=observed, **kwargs)
             if result[2]:
                 status.finish(status="truncated")
@@ -291,22 +314,13 @@ class YuE2Pipeline:
                             token_prefixes(request, self.tokenizer, ids), timing, truncated)
 
     def _stage_boundary(self):
-        """Drain MPS allocator state between stages.
-
-        On Apple Silicon the semantic stage is sensitive to allocator state left
-        behind by the stage before it: planning on MPS and then generating in the
-        same process yields different tokens than generating from a clean pool,
-        which makes a take unreproducible. Draining and synchronising at every
-        stage boundary removes the dependency. A newer torch that happens to mask
-        the workload is not a reason to drop this.
-        """
-        if self.device.type == "mps":
-            torch.mps.empty_cache()
-            torch.mps.synchronize()
+        """Let the selected profile own extra stage-transition operations."""
+        self.profile.stage_boundary(self.device)
 
     def generate_semantic(self, plan, *, sampling=None, carry=None, cancelled=None, on_token=None):
         """Generate the semantic (music token) stage.
 
+        A continuation-enabled profile is required for nonempty ``carry``.
         ``carry`` continues an earlier take: pass its ``SemanticResult.tokens``
         (codec values, CODEC_OFFSET already removed) and the model composes onward
         from that exact audio instead of starting fresh. The carried tokens are
@@ -317,6 +331,7 @@ class YuE2Pipeline:
         """
         if not isinstance(plan, SymbolicPlan):
             raise TypeError("Pass the SymbolicPlan returned by pipe.plan()")
+        self.profile.validate_continuation(carry=carry)
         request = plan.request
         expected = token_prefixes(request, self.tokenizer, plan.abc_ids)
         if expected != plan.prefix:
@@ -331,13 +346,15 @@ class YuE2Pipeline:
                     if request.guidance != 1 else None)
         ids, timing, truncated = self._generate(plan.prefix + carried_ids, sampling, request.seed, "semantic",
                         negative=negative, cfg_scale=request.guidance, legacy_off=request.cot == "off",
-                        cancelled=cancelled, on_token=on_token)
+                        cancelled=cancelled, on_token=on_token,
+                        **({"prior": carried_ids} if self.profile.carry_penalty_history else {}))
         return SemanticResult(plan, carried + [int(t) - CODEC_OFFSET for t in ids], timing, truncated)
 
     def synthesize(self, semantic, *, chunk_seconds=0.0, overlap_seconds=0.0,
                    known_latents=None, blend_seconds=0.0, cancelled=None):
         """Solve the acoustic stage.
 
+        Overrides require a continuation-enabled profile.
         ``known_latents`` are the latents of the take being continued, at 25
         frames per second; they are returned verbatim rather than re-solved, and
         ``blend_seconds`` crossfades out of them instead of cutting. ``chunk_seconds``
@@ -346,6 +363,9 @@ class YuE2Pipeline:
         behaves exactly as the release protocol.
         """
         from .nar import synthesize
+        self.profile.validate_continuation(chunk_seconds=chunk_seconds,
+                                          overlap_seconds=overlap_seconds,
+                                          known_latents=known_latents, blend_seconds=blend_seconds)
         self._stage_boundary()
         if self.backend == "vllm":
             from .fast import close_vllm
@@ -393,11 +413,11 @@ class YuE2Pipeline:
             if self.device.type == "cuda":
                 torch.cuda.empty_cache()
             if vae is not None:
-                model = YuE2VAE.from_pretrained(vae, decoder_only=True, device=self.device)
+                model = YuE2VAE.from_pretrained(vae, decoder_only=True, device=self.device, profile=self.profile)
             else:
                 if self._vae is None:
                     self._vae = YuE2VAE.from_pretrained(self.vae_dir, decoder_only=True, device="cpu",
-                                                        local_files_only=True)
+                                                        local_files_only=True, profile=self.profile)
                 model = self._vae.to(self.device)
         z = torch.as_tensor(latents, dtype=torch.float32)
         if z.ndim == 2 and z.shape[1] == 64:
@@ -432,7 +452,13 @@ class YuE2Pipeline:
         overrides = {k: v for k, v in config.items() if defaults.get(k) != v}
         if request.guidance != (1.01 if request.cot == "off" else 1.0):
             overrides["cfg_scale"] = request.guidance
-        return {"generation": config, "overrides": overrides,
+        from importlib.metadata import distribution
+        package = distribution("yue2-infer")
+        installation = package.read_text("direct_url.json")
+        engine = {"version": package.version,
+                  "installation": json.loads(installation) if installation else None}
+        return {"generation": config, "overrides": overrides, "profile": self.profile.identity(),
+                "engine": engine,
                 "cot": request.cot, "cfg_scale": request.guidance,
                 "cfg_negative": "instruction_only" if request.cot == "off" else "same_instruction_and_exact_abc",
                 "backend": self.backend, "quantization": self.quantization,

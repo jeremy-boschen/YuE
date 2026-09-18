@@ -123,12 +123,15 @@ class YuE2Config(PretrainedConfig):
 
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
+    def __init__(self, dim: int, eps: float = 1e-6, profile=None):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(dim))
         self.eps = eps
+        self.profile = profile
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.profile is not None:
+            return self.profile.rms_norm(x, self.weight, self.eps)
         return x * torch.rsqrt(x.float().pow(2).mean(-1, keepdim=True) + self.eps).to(x.dtype) * self.weight
 
 
@@ -157,8 +160,9 @@ def _apply_rotary(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torc
 
 
 class Attention(nn.Module):
-    def __init__(self, config: YuE2Config):
+    def __init__(self, config: YuE2Config, profile=None):
         super().__init__()
+        self.profile = profile
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
         self.head_dim = config.head_dim
@@ -168,8 +172,8 @@ class Attention(nn.Module):
         self.k_proj = nn.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, config.hidden_size, bias=False)
-        self.q_norm = RMSNorm(self.head_dim, config.rms_norm_eps)
-        self.k_norm = RMSNorm(self.head_dim, config.rms_norm_eps)
+        self.q_norm = RMSNorm(self.head_dim, config.rms_norm_eps, profile)
+        self.k_norm = RMSNorm(self.head_dim, config.rms_norm_eps, profile)
 
     def project_qkv(
         self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
@@ -206,10 +210,11 @@ class Attention(nn.Module):
         if past_key_value is not None:
             k, v = past_key_value.update(k, v, layer_idx, {"cache_position": cache_position})
 
+        operation = self.profile.ar_attention if self.profile is not None else sdpa
         if attention_mask is not None:
-            out = sdpa(q, k, v, attn_mask=attention_mask[..., :k.shape[2]])
+            out = operation(q, k, v, attn_mask=attention_mask[..., :k.shape[2]])
         else:
-            out = sdpa(q, k, v, is_causal=(T > 1 and k.shape[2] == T))
+            out = operation(q, k, v, is_causal=(T > 1 and k.shape[2] == T))
         return self.o_proj(out.transpose(1, 2).reshape(B, T, -1))
 
 
@@ -227,19 +232,19 @@ class MLP(nn.Module):
 class DecoderLayer(nn.Module):
     """Transformer layer with full MoT: dual attention projections + dual MLP."""
 
-    def __init__(self, config: YuE2Config):
+    def __init__(self, config: YuE2Config, profile=None):
         super().__init__()
         # AR attention path
-        self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.self_attn = Attention(config)
+        self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps, profile)
+        self.self_attn = Attention(config, profile)
         # NAR attention path (separate Q/K/V/O + layernorms)
-        self.nar_input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.nar_self_attn = Attention(config)
+        self.nar_input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps, profile)
+        self.nar_self_attn = Attention(config, profile)
         # AR MLP path
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps, profile)
         self.mlp = MLP(config)
         # NAR MLP path
-        self.nar_pre_mlp_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.nar_pre_mlp_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps, profile)
         self.nar_mlp = MLP(config)
 
     def forward(
@@ -408,11 +413,11 @@ class StaticKVCache:
 class Backbone(nn.Module):
     """Transformer backbone with MoT dual MLP."""
 
-    def __init__(self, config: YuE2Config):
+    def __init__(self, config: YuE2Config, profile=None):
         super().__init__()
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.layers = nn.ModuleList([DecoderLayer(config) for _ in range(config.num_hidden_layers)])
-        self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.layers = nn.ModuleList([DecoderLayer(config, profile) for _ in range(config.num_hidden_layers)])
+        self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps, profile)
         self.rotary_emb = RotaryEmbedding(config.head_dim, config.rope_theta)
 
     def forward(
@@ -462,9 +467,10 @@ class YuE2PreTrainedModel(PreTrainedModel):
 class YuE2ForCausalLM(YuE2PreTrainedModel, GenerationMixin):
     """YuE2 model: AR causal LM (generate) + NAR flow matching (ODE)."""
 
-    def __init__(self, config: YuE2Config):
+    def __init__(self, config: YuE2Config, profile=None):
         super().__init__(config)
-        self.model = Backbone(config)
+        self.profile = profile
+        self.model = Backbone(config, profile)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         # NAR auxiliary
