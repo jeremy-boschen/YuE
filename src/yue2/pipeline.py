@@ -351,7 +351,7 @@ class YuE2Pipeline:
         return SemanticResult(plan, carried + [int(t) - CODEC_OFFSET for t in ids], timing, truncated)
 
     def synthesize(self, semantic, *, chunk_seconds=0.0, overlap_seconds=0.0,
-                   known_latents=None, blend_seconds=0.0, cancelled=None, on_step=None):
+                   known_latents=None, blend_seconds=0.0, cancelled=None, on_step=None, noise=None):
         """Solve the acoustic stage.
 
         Overrides require a continuation-enabled profile.
@@ -362,6 +362,8 @@ class YuE2Pipeline:
         voiced like a short render of the same score. Pass nothing and this
         behaves exactly as the release protocol. ``on_step`` observes every
         acoustic ODE state as a ``yue2.nar.FlowStep``; it changes nothing solved.
+        ``noise`` supplies the initial noise ([frames,64], see ``yue2.nar.song_noise``)
+        instead of drawing it from the request seed.
         """
         from .nar import synthesize
         self.profile.validate_continuation(chunk_seconds=chunk_seconds,
@@ -388,7 +390,8 @@ class YuE2Pipeline:
                                 overlap_frames=round(overlap_seconds * 25),
                                 known_latents=known_latents,
                                 blend_frames=round(blend_seconds * 25),
-                                cancelled=cancelled, on_progress=report, on_step=on_step)
+                                cancelled=cancelled, on_progress=report, on_step=on_step,
+                                noise=noise)
             return result.detach().float().cpu().numpy()
 
     def close(self):

@@ -58,9 +58,21 @@ def _integers(values, name):
     return [int(v) for v in result]
 
 
+def song_noise(seed, frames):
+    """The acoustic stage's initial noise for a song of ``frames`` codec frames."""
+    if isinstance(seed, bool) or not isinstance(seed, Integral):
+        raise ValueError("seed must be an integer")
+    generator = torch.Generator(device="cpu").manual_seed(int(seed))
+    return torch.randn((int(frames), 64), dtype=torch.float32, device="cpu", generator=generator)
+
+
 def song_chunks(prefix, codec, seed, context=CONTEXT, chunk_frames=None,
-                overlap_frames=0, known_frames=0):
-    """Draw the complete noise tensor once, then take views at historical cuts."""
+                overlap_frames=0, known_frames=0, noise=None):
+    """Draw the complete noise tensor once, then take views at historical cuts.
+
+    ``noise`` replaces the draw with a caller's [frames,64] tensor (see
+    ``song_noise``); left as None, the noise is drawn from ``seed`` as always.
+    """
     prefix = _integers(prefix, "prefix")
     codec = _integers(codec, "codec")
     if min(prefix) < 0 or min(codec) < 0 or max(codec) >= CODEC_SIZE:
@@ -97,8 +109,12 @@ def song_chunks(prefix, codec, seed, context=CONTEXT, chunk_frames=None,
         ranges = widened
     else:
         ranges = [(a, b, 0) for a, b in ranges]
-    generator = torch.Generator(device="cpu").manual_seed(int(seed))
-    noise = torch.randn((len(codec), 64), dtype=torch.float32, device="cpu", generator=generator)
+    if noise is None:
+        noise = song_noise(seed, len(codec))
+    else:
+        noise = torch.as_tensor(noise, dtype=torch.float32, device="cpu")
+        if tuple(noise.shape) != (len(codec), 64):
+            raise ValueError(f"noise must be shaped [{len(codec)},64]")
     return [Chunk(prefix + [value + CODEC_OFFSET for value in codec[a:b]] + [MUSIC_END], noise[a:b], 0, take, a)
             for a, b, take in ranges]
 
@@ -315,7 +331,7 @@ def synthesize(model, prefix: Sequence[int], codec: Sequence[int], seed: int,
                cancelled=None, query_chunk_size=None, chunk_frames=None, overlap_frames=0,
                known_latents=None, blend_frames=0,
                on_progress: Callable[[int, int], None] | None = None,
-               on_step: Callable[[FlowStep], None] | None = None):
+               on_step: Callable[[FlowStep], None] | None = None, noise=None):
     """Return CPU FP32 [frames,64] latents, solving original chunks serially.
 
     Defaults preserve the release protocol, including the single full-song chunk
@@ -344,7 +360,7 @@ def synthesize(model, prefix: Sequence[int], codec: Sequence[int], seed: int,
             raise ValueError("known_latents must be shaped [frames,64]")
     carried = 0 if known_latents is None else len(known_latents)
     chunks = song_chunks(prefix, codec, seed, context, chunk_frames=chunk_frames,
-                         overlap_frames=overlap_frames, known_frames=carried)
+                         overlap_frames=overlap_frames, known_frames=carried, noise=noise)
     output = []
     for chunk_index, chunk in enumerate(chunks):
         if cancelled is not None and cancelled():

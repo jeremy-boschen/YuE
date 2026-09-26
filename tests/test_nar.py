@@ -363,3 +363,18 @@ def test_synthesis_steps_report_pinned_lead_frames(model, tiny_vocab):
                    on_step=steps.append)
     assert {s.lead for s in steps if s.chunk_index == 0} == {4}
     assert all(s.state.shape == (s.end - s.start, 64) for s in steps)
+
+
+def test_supplied_noise_replaces_the_draw_and_nothing_else():
+    from yue2.nar import song_chunks, song_noise
+    codec = list(range(40))
+    drawn = song_chunks([1, 2], codec, 7)
+    base = song_noise(7, len(codec))
+    generator = torch.Generator(device="cpu").manual_seed(7)
+    assert torch.equal(base, torch.randn((40, 64), dtype=torch.float32, generator=generator))
+    same = song_chunks([1, 2], codec, 7, noise=base.clone())
+    assert [torch.equal(a.noise, b.noise) and a.ar_tokens == b.ar_tokens for a, b in zip(drawn, same)] == [True] * len(drawn)
+    flipped = song_chunks([1, 2], codec, 7, noise=-base)
+    assert torch.equal(flipped[0].noise, -drawn[0].noise)
+    with pytest.raises(ValueError, match="noise must be shaped"):
+        song_chunks([1, 2], codec, 7, noise=base[:-1])
