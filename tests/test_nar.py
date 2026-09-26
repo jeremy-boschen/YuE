@@ -326,6 +326,21 @@ def test_step_observer_sees_noise_then_every_state_and_changes_nothing(model):
                for c, _, s, v in seen[:-1])
 
 
+def test_a_solve_resumed_from_its_own_state_at_step_k_is_the_same_solve(model):
+    noise = torch.randn((3, 64), generator=torch.Generator().manual_seed(392))
+    engine = nar.CachedNAR(model, nar.Chunk([2, 3], noise))
+    states = {}
+    expected = engine.solve(4, None, on_step=lambda c, t, s, v: states.setdefault(c, s.clone()))
+    resumed = nar.CachedNAR(model, nar.Chunk([2, 3], states[2].float().cpu()))
+    seen = []
+    actual = resumed.solve(4, None, on_step=lambda c, t, s, v: seen.append(c), start_step=2)
+    assert seen == [2, 3, 4]
+    assert torch.equal(actual, expected)
+    for bad in (-1, 4, 1.5, True):
+        with pytest.raises(ValueError, match="start_step"):
+            engine.solve(4, start_step=bad)
+
+
 def test_step_observer_exception_stops_the_solve(model):
     engine = nar.CachedNAR(model, nar.Chunk([2, 3], torch.zeros(2, 64)))
 

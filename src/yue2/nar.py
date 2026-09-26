@@ -248,8 +248,13 @@ class CachedNAR:
     @torch.inference_mode()
     def solve(self, steps=32, cancelled: Callable[[], bool] | None = None,
               on_progress: Callable[[int, int], None] | None = None,
-              on_step: Callable[[int, int, torch.Tensor, torch.Tensor | None], None] | None = None):
+              on_step: Callable[[int, int, torch.Tensor, torch.Tensor | None], None] | None = None,
+              start_step: int = 0):
         """Solve a chunk, reporting each submitted midpoint step without syncing.
+
+        ``start_step`` k > 0 begins the solve at flow time t = 1 - k/steps, taking
+        the chunk's noise as the state already there (a caller builds it, e.g.
+        t*noise + (1-t)*reference); 0 is the full solve from noise.
 
         CUDA work may still be executing when ``on_progress`` runs. The existing
         CPU result transfer completes that work before this method returns.
@@ -263,6 +268,8 @@ class CachedNAR:
         """
         if isinstance(steps, bool) or not isinstance(steps, Integral) or steps < 1:
             raise ValueError("steps must be a positive integer")
+        if isinstance(start_step, bool) or not isinstance(start_step, Integral) or not 0 <= start_step < steps:
+            raise ValueError("start_step must be an integer in 0..steps-1")
         noise = self.chunk.noise.to(device=self.device, dtype=self.dtype)
         keep = len(self.known) if self.known is not None else 0
 
@@ -274,9 +281,9 @@ class CachedNAR:
             x[:keep] = t * noise[:keep] + (1.0 - t) * self.known
             return x
 
-        state = pin(noise, 1.0) if keep else noise
         dt = 1.0 / steps
-        for step in range(steps):
+        state = pin(noise, 1.0 - int(start_step) * dt) if keep else noise
+        for step in range(int(start_step), steps):
             if cancelled is not None and cancelled():
                 raise InterruptedError("Cancelled during acoustic flow matching")
             t = 1.0 - step * dt
@@ -331,7 +338,7 @@ def synthesize(model, prefix: Sequence[int], codec: Sequence[int], seed: int,
                cancelled=None, query_chunk_size=None, chunk_frames=None, overlap_frames=0,
                known_latents=None, blend_frames=0,
                on_progress: Callable[[int, int], None] | None = None,
-               on_step: Callable[[FlowStep], None] | None = None, noise=None):
+               on_step: Callable[[FlowStep], None] | None = None, noise=None, start_step=0):
     """Return CPU FP32 [frames,64] latents, solving original chunks serially.
 
     Defaults preserve the release protocol, including the single full-song chunk
@@ -392,7 +399,8 @@ def synthesize(model, prefix: Sequence[int], codec: Sequence[int], seed: int,
                         on_step(FlowStep(chunk_index, len(chunks), chunk.start,
                                          chunk.start + len(chunk.noise), chunk.lead,
                                          completed, total, 1.0 - completed * (1.0 / total), state, velocity))
-                solved = engine.solve(steps, cancelled, on_progress=progress, on_step=observe)
+                solved = engine.solve(steps, cancelled, on_progress=progress, on_step=observe,
+                                      start_step=start_step)
             finally:
                 engine.close()
         del engine
