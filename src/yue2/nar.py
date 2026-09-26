@@ -23,6 +23,32 @@ class Chunk:
     noise: torch.Tensor
     nar_cond_end: int = 0
     lead: int = 0          # leading frames already solved, pinned during the ODE
+    start: int = 0         # first song frame this chunk's noise covers
+
+
+@dataclass(frozen=True)
+class FlowStep:
+    """One observed acoustic ODE state, located in the song.
+
+    ``state`` is the solver's own tensor on the model device and dtype: step 0
+    is the initial noise, step ``steps`` is the solution. ``velocity`` is the
+    velocity the solver evaluated at that state (None for the solution, where
+    none is evaluated) and ``t`` its flow time, 1 at noise and 0 at data, so
+    ``state - t * velocity`` is the solver's current estimate of the solution.
+    Neither tensor is written after it is reported, so holding a reference is
+    safe; modifying one is not. Frames ``start:end`` of the song are covered,
+    the first ``lead`` of them pinned to already-solved values.
+    """
+    chunk_index: int
+    chunk_count: int
+    start: int
+    end: int
+    lead: int
+    step: int
+    steps: int
+    t: float
+    state: torch.Tensor
+    velocity: torch.Tensor | None = None
 
 
 def _integers(values, name):
@@ -73,7 +99,7 @@ def song_chunks(prefix, codec, seed, context=CONTEXT, chunk_frames=None,
         ranges = [(a, b, 0) for a, b in ranges]
     generator = torch.Generator(device="cpu").manual_seed(int(seed))
     noise = torch.randn((len(codec), 64), dtype=torch.float32, device="cpu", generator=generator)
-    return [Chunk(prefix + [value + CODEC_OFFSET for value in codec[a:b]] + [MUSIC_END], noise[a:b], 0, take)
+    return [Chunk(prefix + [value + CODEC_OFFSET for value in codec[a:b]] + [MUSIC_END], noise[a:b], 0, take, a)
             for a, b, take in ranges]
 
 
@@ -205,11 +231,18 @@ class CachedNAR:
 
     @torch.inference_mode()
     def solve(self, steps=32, cancelled: Callable[[], bool] | None = None,
-              on_progress: Callable[[int, int], None] | None = None):
+              on_progress: Callable[[int, int], None] | None = None,
+              on_step: Callable[[int, int, torch.Tensor, torch.Tensor | None], None] | None = None):
         """Solve a chunk, reporting each submitted midpoint step without syncing.
 
         CUDA work may still be executing when ``on_progress`` runs. The existing
         CPU result transfer completes that work before this method returns.
+        ``on_step(completed, steps, state, velocity)`` observes every ODE state,
+        the initial noise as step 0 through the solution as step ``steps``, each
+        with the velocity the solver evaluated there (None for the solution). A
+        state is reported once its velocity exists, so no model call is added.
+        Neither tensor is written after it is reported; the callback must not
+        write them either. Whatever it copies or synchronizes is its own cost.
         Callback exceptions propagate to the caller.
         """
         if isinstance(steps, bool) or not isinstance(steps, Integral) or steps < 1:
@@ -233,6 +266,8 @@ class CachedNAR:
             t = 1.0 - step * dt
             raw = torch.logit(torch.tensor(t, dtype=torch.float64, device="cpu")).clamp(-20, 20).item()
             first = self.velocity(state, raw)
+            if on_step is not None:
+                on_step(step, int(steps), state, first)
             mid = pin(state - first * (dt / 2), t - dt / 2)
             if cancelled is not None and cancelled():
                 raise InterruptedError("Cancelled during acoustic flow matching")
@@ -240,6 +275,8 @@ class CachedNAR:
             state = pin(state - self.velocity(mid, raw_mid) * dt, max(0.0, t - dt))
             if on_progress is not None:
                 on_progress(step + 1, int(steps))
+        if on_step is not None:
+            on_step(int(steps), int(steps), state, None)
         result = state.float().cpu()
         if not torch.isfinite(result).all():
             raise FloatingPointError("Acoustic flow matching produced non-finite latents")
@@ -277,7 +314,8 @@ def synthesize(model, prefix: Sequence[int], codec: Sequence[int], seed: int,
                steps=32, context=CONTEXT, attention="sdpa", offload_ar=False,
                cancelled=None, query_chunk_size=None, chunk_frames=None, overlap_frames=0,
                known_latents=None, blend_frames=0,
-               on_progress: Callable[[int, int], None] | None = None):
+               on_progress: Callable[[int, int], None] | None = None,
+               on_step: Callable[[FlowStep], None] | None = None):
     """Return CPU FP32 [frames,64] latents, solving original chunks serially.
 
     Defaults preserve the release protocol, including the single full-song chunk
@@ -291,6 +329,8 @@ def synthesize(model, prefix: Sequence[int], codec: Sequence[int], seed: int,
     Progress counts submitted midpoint steps across all original chunks; it
     introduces no device synchronization. Callback exceptions propagate after
     the current chunk's cache is released and any offloaded weights restored.
+    ``on_step`` receives a ``FlowStep`` for every ODE state of every chunk,
+    including each chunk's initial noise; see ``CachedNAR.solve``.
     """
     if model.training:
         raise ValueError("synthesize requires model.eval()")
@@ -330,7 +370,13 @@ def synthesize(model, prefix: Sequence[int], codec: Sequence[int], seed: int,
                 if on_progress is not None:
                     def progress(completed, total):
                         on_progress(chunk_index * total + completed, total * len(chunks))
-                solved = engine.solve(steps, cancelled, on_progress=progress)
+                observe = None
+                if on_step is not None:
+                    def observe(completed, total, state, velocity):
+                        on_step(FlowStep(chunk_index, len(chunks), chunk.start,
+                                         chunk.start + len(chunk.noise), chunk.lead,
+                                         completed, total, 1.0 - completed * (1.0 / total), state, velocity))
+                solved = engine.solve(steps, cancelled, on_progress=progress, on_step=observe)
             finally:
                 engine.close()
         del engine

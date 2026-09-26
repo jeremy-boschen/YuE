@@ -293,3 +293,73 @@ def test_misshapen_known_latents_are_rejected_before_the_model_sees_them(model, 
     for bad in (np.zeros((4,), dtype=np.float32), np.zeros((4, 63), dtype=np.float32)):
         with pytest.raises(ValueError, match="known_latents must be shaped"):
             nar.synthesize(model, [2, 3], [1] * 11, 42, steps=2, context=15, known_latents=bad)
+
+
+# --- observing the ODE --------------------------------------------------------
+
+def test_step_observer_sees_noise_then_every_state_and_changes_nothing(model):
+    noise = torch.randn((3, 64), generator=torch.Generator().manual_seed(391))
+    engine = nar.CachedNAR(model, nar.Chunk([2, 3], noise))
+    expected = engine.solve(4, None)
+    seen, copies = [], []
+
+    def observe(completed, total, state, velocity):
+        seen.append((completed, total, state, velocity))
+        copies.append((state.clone(), None if velocity is None else velocity.clone()))
+
+    rng = torch.random.get_rng_state().clone()
+    actual = engine.solve(4, None, on_step=observe)
+    assert torch.equal(torch.random.get_rng_state(), rng)
+    assert torch.equal(actual, expected)
+    assert [(c, t) for c, t, *_ in seen] == [(step, 4) for step in range(5)]
+    assert torch.equal(seen[0][2], noise.to(seen[0][2].dtype))
+    # The solver never writes a state after reporting it, so a held reference
+    # still reads what was reported.
+    assert all(torch.equal(s, c) and (v is None or torch.equal(v, cv))
+               for (_, _, s, v), (c, cv) in zip(seen, copies))
+    # The last observed state is the solution, before its CPU FP32 transfer.
+    assert torch.equal(seen[-1][2].float().cpu(), actual)
+    # Each reported velocity is the one the solver evaluated at that state.
+    assert seen[-1][3] is None
+    assert all(torch.equal(v, engine.velocity(s, torch.logit(torch.tensor(1.0 - c * 0.25, dtype=torch.float64))
+                                               .clamp(-20, 20).item()))
+               for c, _, s, v in seen[:-1])
+
+
+def test_step_observer_exception_stops_the_solve(model):
+    engine = nar.CachedNAR(model, nar.Chunk([2, 3], torch.zeros(2, 64)))
+
+    def observe(completed, total, state, velocity):
+        if completed == 1:
+            raise RuntimeError("observer failed")
+
+    with patch.object(engine, "velocity", wraps=engine.velocity) as velocity:
+        with pytest.raises(RuntimeError, match="observer failed"):
+            engine.solve(4, on_step=observe)
+    # Step 1 is reported once its velocity exists: after step 0's two calls and one more.
+    assert velocity.call_count == 3
+
+
+def test_synthesis_steps_name_their_chunk_and_frames(model, tiny_vocab):
+    expected = nar.synthesize(model, [2, 3], [1] * 11, 42, steps=2, context=15)
+    steps = []
+    rng = torch.random.get_rng_state().clone()
+    actual = nar.synthesize(model, [2, 3], [1] * 11, 42, steps=2, context=15, on_step=steps.append)
+    assert torch.equal(torch.random.get_rng_state(), rng)
+    assert torch.equal(actual, expected)
+    ranges = [(a, b) for a, b in nar.chunk_ranges(11, 2, 15)]
+    assert [(s.chunk_index, s.chunk_count, s.start, s.end, s.lead, s.step, s.steps) for s in steps] == [
+        (index, len(ranges), a, b, 0, step, 2) for index, (a, b) in enumerate(ranges) for step in range(3)]
+    finals = torch.cat([s.state.float().cpu() for s in steps if s.step == s.steps])
+    assert torch.equal(finals, actual)
+    assert [s.t for s in steps[:3]] == [1.0, 0.5, 0.0]
+    assert all((s.velocity is None) == (s.step == s.steps) for s in steps)
+
+
+def test_synthesis_steps_report_pinned_lead_frames(model, tiny_vocab):
+    _, carried = _carry_case(model, carried_frames=4)
+    steps = []
+    nar.synthesize(model, [2, 3], [1] * 11, 42, steps=2, context=15, known_latents=carried,
+                   on_step=steps.append)
+    assert {s.lead for s in steps if s.chunk_index == 0} == {4}
+    assert all(s.state.shape == (s.end - s.start, 64) for s in steps)

@@ -132,8 +132,9 @@ def test_pipeline_passes_acoustic_callbacks_only_when_enabled(enabled, monkeypat
 
     def synthesize(model, prefix, tokens, seed, *, steps, context, offload_ar, cancelled,
                    on_progress, chunk_frames=None, overlap_frames=0, known_latents=None,
-                   blend_frames=0):
+                   blend_frames=0, on_step=None):
         seen.append(on_progress is not None)
+        assert on_step is None             # nobody observing: the solver is not handed a hook
         assert steps == pipe.generation_config.ode_steps and context == pipe.generation_config.context
         assert tokens == [1, 2] and seed == 42 and offload_ar is False
         # Acoustic levers default to the release protocol: one full-song chunk,
