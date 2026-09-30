@@ -21,3 +21,6 @@ runs/
 *.whl
 *.partial
 .DS_Store
+
+# Git worktrees for parallel branches (see the project rules).
+.worktrees/
