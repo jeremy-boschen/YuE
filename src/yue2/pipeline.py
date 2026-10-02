@@ -317,7 +317,8 @@ class YuE2Pipeline:
         """Let the selected profile own extra stage-transition operations."""
         self.profile.stage_boundary(self.device)
 
-    def generate_semantic(self, plan, *, sampling=None, carry=None, cancelled=None, on_token=None):
+    def generate_semantic(self, plan, *, sampling=None, carry=None, cancelled=None, on_token=None,
+                          negative_style=None, negative_lyrics=None):
         """Generate the semantic (music token) stage.
 
         A continuation-enabled profile is required for nonempty ``carry``.
@@ -333,6 +334,12 @@ class YuE2Pipeline:
             raise TypeError("Pass the SymbolicPlan returned by pipe.plan()")
         self.profile.validate_continuation(carry=carry)
         request = plan.request
+        custom_negative = negative_style is not None or negative_lyrics is not None
+        if custom_negative:
+            if not isinstance(negative_style, str) or not isinstance(negative_lyrics, str):
+                raise ValueError("Provide both negative_style and negative_lyrics as strings")
+            if request.cot == "off":
+                raise ValueError("Custom negative experiment requires a shared ABC score")
         expected = token_prefixes(request, self.tokenizer, plan.abc_ids)
         if expected != plan.prefix:
             raise ValueError("Plan prefix disagrees with request/exact ABC IDs")
@@ -344,6 +351,9 @@ class YuE2Pipeline:
         sampling = resolve_sampling(sampling, self.generation_config.semantic)
         negative = (negative_prefix(request, self.tokenizer, plan.abc_ids) + carried_ids
                     if request.guidance != 1 else None)
+        if custom_negative and request.guidance != 1:
+            negative_request = dataclasses.replace(request, style=negative_style, lyrics=negative_lyrics)
+            negative = token_prefixes(negative_request, self.tokenizer, plan.abc_ids) + carried_ids
         ids, timing, truncated = self._generate(plan.prefix + carried_ids, sampling, request.seed, "semantic",
                         negative=negative, cfg_scale=request.guidance, legacy_off=request.cot == "off",
                         cancelled=cancelled, on_token=on_token,
