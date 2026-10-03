@@ -21,8 +21,6 @@ class ComfyUIYuE2MPSProfile(OfficialProfile):
     def validate(self, device, *, backend, quantization, rng_device):
         import platform
         import os
-        import subprocess
-        import torch
         from importlib.metadata import version
         for key, expected in {'MTLFLASHATTN_KERNEL': 'auto', 'MTLFLASHATTN_V2_PREUSE': 'auto',
                               'MTLFLASHATTN_V2_FP32_MIN_SEQ': '2048', 'MTLFLASHATTN_TORCH_CHUNK': '2048'}.items():
@@ -32,16 +30,12 @@ class ComfyUIYuE2MPSProfile(OfficialProfile):
             raise ValueError(f'{self.name} requires MPS, torch/torch-eager and unquantized BF16 models')
         if rng_device not in (None, 'auto', 'cpu'):
             raise ValueError(f'{self.name} requires CPU sampling RNG')
-        if platform.system() != 'Darwin' or platform.mac_ver()[0] != '26.6.2':
-            raise RuntimeError(f'{self.name} is validated on macOS 26.6.2')
-        cpu = subprocess.check_output(['sysctl', '-n', 'machdep.cpu.brand_string'], text=True).strip()
-        if cpu != 'Apple M5 Pro':
-            raise RuntimeError(f'{self.name} is validated on Apple M5 Pro, found {cpu}')
-        for name, expected in [('torch', '2.14.0'), ('mtlflashattn', '0.2.0')]:
-            if version(name) != expected:
-                raise RuntimeError(f'{self.name} requires {name}=={expected}')
-        if torch.version.git_version != '08187d9e0fba026dc8217405802ab5381dc88d90':
-            raise RuntimeError(f'{self.name} requires the validated Torch build')
+        # The reference runtime (comfyui_reference.json) is recorded, not required: a
+        # different chip, macOS, torch or mtlflashattn may compute other bytes, and the
+        # caller's stack fingerprint (audiogen-yue2 audiogen.fingerprint) is what says so.
+        if platform.system() != 'Darwin':
+            raise RuntimeError(f'{self.name} requires macOS')
+        version('mtlflashattn')
 
     def sampling_rng_device(self, requested):
         return 'cpu'

@@ -47,8 +47,11 @@ This metadata revision does not change ComfyUI numerical operations.
 The frozen contract targets Apple M5 Pro, macOS26.6.2, Torch2.14.0 at commit
 `08187d9e0fba026dc8217405802ab5381dc88d90`, mtlflashattn0.2.0, BF16 music model
 and FP32 VAE. See the bundled `profiles/comfyui_reference.json` for reference
-source revisions and launch settings. Construction rejects unsupported runtime,
-backend, quantization, RNG and kernel overrides instead of silently falling back.
+source revisions and launch settings. That runtime is where the contract was
+validated, not a requirement: another chip, macOS, torch or mtlflashattn is accepted
+and may compute other bytes, which the caller's stack fingerprint detects
+(audiogen-yue2 `audiogen.fingerprint`). Construction rejects unsupported backend,
+quantization, RNG and kernel overrides instead of silently falling back.
 Stock attention on the profile's explicitly defined small/masked paths is part
 of the contract, not an error fallback. A selected Metal kernel failure is fatal.
 
