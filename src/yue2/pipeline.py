@@ -155,6 +155,8 @@ class YuE2Pipeline:
         self.vae_core_frames = vae_core_frames if vae_core_frames is not None else (512 if memory_budget_gib <= 12 else 1024)
         self.offload_ar = offload_ar
         self.generation_config = generation_config or GenerationConfig()
+        if backend == "vllm" and self.generation_config.ar_attention != "standard":
+            raise ValueError("vLLM chooses its own attention; ar_attention must be standard")
         self.tokenizer = YuE2TextTokenizer(self.model_dir / "qwen.tiktoken")
         with self._status("Verifying model files"):
             self.weights = {"mot": model_identity(self.model_dir, verify_hashes),
@@ -260,6 +262,10 @@ class YuE2Pipeline:
                 from .quantization import prepare_fp8_ar
                 prepare_fp8_ar(self._model, self.device)
             self._model.to(self.device)
+        from .modeling_yue2 import Attention
+        for module in self._model.modules():
+            if isinstance(module, Attention):
+                module.decode_gqa = self.generation_config.ar_attention == "gqa"
         for hook in self.on_model_ready:
             hook(self._model, for_nar=for_nar, fresh=fresh, loaded=loading)
         return self._model
@@ -393,7 +399,8 @@ class YuE2Pipeline:
                                 known_latents=known_latents,
                                 blend_frames=round(blend_seconds * 25),
                                 cancelled=cancelled, on_progress=report, on_step=on_step,
-                                noise=noise, start_step=start_step)
+                                noise=noise, start_step=start_step,
+                                method=self.generation_config.ode_method)
             return result.detach().float().cpu().numpy()
 
     def close(self):

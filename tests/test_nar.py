@@ -393,3 +393,32 @@ def test_supplied_noise_replaces_the_draw_and_nothing_else():
     assert torch.equal(flipped[0].noise, -drawn[0].noise)
     with pytest.raises(ValueError, match="noise must be shaped"):
         song_chunks([1, 2], codec, 7, noise=base[:-1])
+
+
+def test_ab2_is_one_midpoint_step_then_adams_bashforth_2(model):
+    chunk = nar.Chunk([2, 3, 4, 5], torch.randn((3, 64), generator=torch.Generator().manual_seed(383)))
+    engine = nar.CachedNAR(model, chunk)
+    actual = engine.solve(steps=4, method="ab2")
+    expected, dt, previous = chunk.noise.clone(), 1 / 4, None
+    for step in range(4):
+        t = 1 - step * dt
+        raw = torch.logit(torch.tensor(t, dtype=torch.float64)).clamp(-20, 20).item()
+        first = dense_velocity(model, chunk, expected, raw)
+        if previous is None:
+            raw_mid = torch.logit(torch.tensor(t - dt / 2, dtype=torch.float64)).clamp(-20, 20).item()
+            expected = expected - dense_velocity(model, chunk, expected - first * (dt / 2), raw_mid) * dt
+        else:
+            expected = expected - (1.5 * first - 0.5 * previous) * dt
+        previous = first
+    torch.testing.assert_close(actual, expected, atol=1e-6, rtol=2e-5)
+
+
+def test_ab2_calls_the_model_once_per_step_after_the_first(model):
+    noise = torch.zeros((2, 64))
+    engine = nar.CachedNAR(model, nar.Chunk([2, 3], noise))
+    with patch.object(engine, "velocity", return_value=torch.ones_like(noise)) as velocity:
+        actual = engine.solve(method="ab2")
+    assert velocity.call_count == 33
+    torch.testing.assert_close(actual, -torch.ones_like(noise), atol=0, rtol=0)
+    with pytest.raises(ValueError):
+        engine.solve(method="euler")

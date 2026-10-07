@@ -249,8 +249,11 @@ class CachedNAR:
     def solve(self, steps=32, cancelled: Callable[[], bool] | None = None,
               on_progress: Callable[[int, int], None] | None = None,
               on_step: Callable[[int, int, torch.Tensor, torch.Tensor | None], None] | None = None,
-              start_step: int = 0):
+              start_step: int = 0, method: str = "midpoint"):
         """Solve a chunk, reporting each submitted midpoint step without syncing.
+
+        ``method`` "ab2" takes each step after the first as Adams-Bashforth 2,
+        state - (1.5 v_now - 0.5 v_prev) dt, one model call instead of two.
 
         ``start_step`` k > 0 begins the solve at flow time t = 1 - k/steps, taking
         the chunk's noise as the state already there (a caller builds it, e.g.
@@ -270,6 +273,8 @@ class CachedNAR:
             raise ValueError("steps must be a positive integer")
         if isinstance(start_step, bool) or not isinstance(start_step, Integral) or not 0 <= start_step < steps:
             raise ValueError("start_step must be an integer in 0..steps-1")
+        if method not in ("midpoint", "ab2"):
+            raise ValueError("method must be 'midpoint' or 'ab2'")
         noise = self.chunk.noise.to(device=self.device, dtype=self.dtype)
         keep = len(self.known) if self.known is not None else 0
 
@@ -283,6 +288,7 @@ class CachedNAR:
 
         dt = 1.0 / steps
         state = pin(noise, 1.0 - int(start_step) * dt) if keep else noise
+        previous = None
         for step in range(int(start_step), steps):
             if cancelled is not None and cancelled():
                 raise InterruptedError("Cancelled during acoustic flow matching")
@@ -291,11 +297,15 @@ class CachedNAR:
             first = self.velocity(state, raw)
             if on_step is not None:
                 on_step(step, int(steps), state, first)
-            mid = pin(state - first * (dt / 2), t - dt / 2)
-            if cancelled is not None and cancelled():
-                raise InterruptedError("Cancelled during acoustic flow matching")
-            raw_mid = torch.logit(torch.tensor(t - dt / 2, dtype=torch.float64, device="cpu")).clamp(-20, 20).item()
-            state = pin(state - self.velocity(mid, raw_mid) * dt, max(0.0, t - dt))
+            if method == "ab2" and previous is not None:
+                state = pin(state - (1.5 * first - 0.5 * previous) * dt, max(0.0, t - dt))
+            else:
+                mid = pin(state - first * (dt / 2), t - dt / 2)
+                if cancelled is not None and cancelled():
+                    raise InterruptedError("Cancelled during acoustic flow matching")
+                raw_mid = torch.logit(torch.tensor(t - dt / 2, dtype=torch.float64, device="cpu")).clamp(-20, 20).item()
+                state = pin(state - self.velocity(mid, raw_mid) * dt, max(0.0, t - dt))
+            previous = first
             if on_progress is not None:
                 on_progress(step + 1, int(steps))
         if on_step is not None:
@@ -338,7 +348,8 @@ def synthesize(model, prefix: Sequence[int], codec: Sequence[int], seed: int,
                cancelled=None, query_chunk_size=None, chunk_frames=None, overlap_frames=0,
                known_latents=None, blend_frames=0,
                on_progress: Callable[[int, int], None] | None = None,
-               on_step: Callable[[FlowStep], None] | None = None, noise=None, start_step=0):
+               on_step: Callable[[FlowStep], None] | None = None, noise=None, start_step=0,
+               method="midpoint"):
     """Return CPU FP32 [frames,64] latents, solving original chunks serially.
 
     Defaults preserve the release protocol, including the single full-song chunk
@@ -400,7 +411,7 @@ def synthesize(model, prefix: Sequence[int], codec: Sequence[int], seed: int,
                                          chunk.start + len(chunk.noise), chunk.lead,
                                          completed, total, 1.0 - completed * (1.0 / total), state, velocity))
                 solved = engine.solve(steps, cancelled, on_progress=progress, on_step=observe,
-                                      start_step=start_step)
+                                      start_step=start_step, method=method)
             finally:
                 engine.close()
         del engine

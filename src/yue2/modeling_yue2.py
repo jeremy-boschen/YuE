@@ -160,6 +160,8 @@ def _apply_rotary(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torc
 
 
 class Attention(nn.Module):
+    decode_gqa = False   # set by the pipeline from GenerationConfig.ar_attention
+
     def __init__(self, config: YuE2Config, profile=None):
         super().__init__()
         self.profile = profile
@@ -211,7 +213,10 @@ class Attention(nn.Module):
             k, v = past_key_value.update(k, v, layer_idx, {"cache_position": cache_position})
 
         operation = self.profile.ar_attention if self.profile is not None else sdpa
-        if attention_mask is not None:
+        if self.decode_gqa and T == 1 and attention_mask is None:
+            # GenerationConfig.ar_attention "gqa": native grouped-query attention for a decode step.
+            out = F.scaled_dot_product_attention(q, k, v, enable_gqa=True)
+        elif attention_mask is not None:
             out = operation(q, k, v, attn_mask=attention_mask[..., :k.shape[2]])
         else:
             out = operation(q, k, v, is_causal=(T > 1 and k.shape[2] == T))

@@ -41,6 +41,12 @@ class Sampling:
             raise ValueError("Require 0 <= min_tokens <= max_tokens")
 
 
+# Sound-stage solvers. "midpoint" is the release protocol (2 model calls per step);
+# "ab2" is Adams-Bashforth 2 (a midpoint first step, then 1 call per step reusing the
+# previous velocity): same notes, about half the sound-stage time, slightly different audio.
+ODE_METHODS = ("midpoint", "ab2")
+
+
 @dataclass(frozen=True)
 class GenerationConfig:
     abc: Sampling = field(default_factory=lambda: Sampling(.7, .9, 30, 1.005, 100, 32, 4096))
@@ -57,15 +63,29 @@ class GenerationConfig:
     # within one RNG device; "cpu" is what makes a take portable. Ignored by the vllm
     # backend, which samples inside vLLM rather than through this generator.
     rng_device: str = "auto"
+    # How a single new token attends to the cache while writing.
+    #   "standard"  the released behaviour
+    #   "gqa"       native grouped-query attention for decode steps. Already what CUDA
+    #               does; on MPS it replaces a repeat-the-keys fallback and is ~3.5x
+    #               faster on a whole song, but rounds differently, so the same seed
+    #               writes a different take there.
+    ar_attention: str = "standard"
 
     def __post_init__(self):
-        if self.context != CONTEXT or self.ode_method != "midpoint" or type(self.ode_steps) is not int or self.ode_steps < 1:
-            raise ValueError("Require context=24576 and midpoint with positive integer steps")
+        if self.context != CONTEXT or self.ode_method not in ODE_METHODS or type(self.ode_steps) is not int or self.ode_steps < 1:
+            raise ValueError("Require context=24576, an ODE method in midpoint/ab2 and positive integer steps")
         if self.rng_device not in {"auto", "cpu", "device"}:
             raise ValueError("rng_device must be 'auto', 'cpu' or 'device'")
+        if self.ar_attention not in {"standard", "gqa"}:
+            raise ValueError("ar_attention must be 'standard' or 'gqa'")
 
     def to_dict(self):
-        return asdict(self)
+        # A default ar_attention is left out, so every config written before it existed
+        # reads, hashes and reproduces exactly as it did.
+        value = asdict(self)
+        if value["ar_attention"] == "standard":
+            del value["ar_attention"]
+        return value
 
     @classmethod
     def from_dict(cls, data):
