@@ -132,7 +132,8 @@ def test_pipeline_passes_acoustic_callbacks_only_when_enabled(enabled, monkeypat
 
     def synthesize(model, prefix, tokens, seed, *, steps, context, offload_ar, cancelled,
                    on_progress, chunk_frames=None, overlap_frames=0, known_latents=None,
-                   blend_frames=0, on_step=None, noise=None, start_step=0, method="midpoint"):
+                   blend_frames=0, on_step=None, noise=None, start_step=0, method="midpoint",
+                   fused_attention=False):
         seen.append(on_progress is not None)
         assert on_step is None             # nobody observing: the solver is not handed a hook
         assert noise is None               # nothing supplied: the noise is drawn from the seed

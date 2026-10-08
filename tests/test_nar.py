@@ -422,3 +422,32 @@ def test_ab2_calls_the_model_once_per_step_after_the_first(model):
     torch.testing.assert_close(actual, -torch.ones_like(noise), atol=0, rtol=0)
     with pytest.raises(ValueError):
         engine.solve(method="euler")
+
+
+def test_fused_attention_matches_standard_in_one_call_per_attention(model):
+    """nar_attention "fused": the same velocity (CPU FP32), every query row in one SDPA call
+    with grouped K/V heads left grouped."""
+    noise = torch.randn((5, 64), generator=torch.Generator().manual_seed(42))
+    chunk = nar.Chunk([2, 3, 4, 5], noise)
+    standard = nar.CachedNAR(model, chunk, query_chunk_size=2)
+    with patch.object(nar.F, "scaled_dot_product_attention", wraps=F.scaled_dot_product_attention) as call:
+        fused = nar.CachedNAR(model, chunk, query_chunk_size=2, fused=True)
+        actual = fused.velocity(noise, 0.3)
+    layers = len(model.model.layers)
+    assert call.call_count == 2 * layers                     # prefill + one velocity, one call per layer
+    assert all(row.args[0].shape[-2] in (4, 7) for row in call.call_args_list)
+    torch.testing.assert_close(actual, standard.velocity(noise, 0.3), atol=1e-6, rtol=2e-5)
+    standard.close()
+    fused.close()
+
+
+def test_synthesize_passes_fused_attention_to_every_chunk(model, tiny_vocab):
+    seen = []
+    original = nar.CachedNAR.__init__
+
+    def record(self, *args, fused=False, **kwargs):
+        seen.append(fused)
+        original(self, *args, fused=fused, **kwargs)
+    with patch.object(nar.CachedNAR, "__init__", record):
+        nar.synthesize(model, [1, 2, 3], [0, 1, 2, 3], 5, steps=2, fused_attention=True, chunk_frames=2)
+    assert seen == [True, True]

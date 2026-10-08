@@ -114,10 +114,12 @@ def test_saved_plan_preserves_exact_ids_and_rejects_edits(tmp_path):
 
 def test_speed_options_validate_and_leave_old_configs_unchanged():
     assert "ar_attention" not in GenerationConfig().to_dict()
+    assert "nar_attention" not in GenerationConfig().to_dict()
     assert GenerationConfig.from_dict(GenerationConfig().to_dict()) == GenerationConfig()
-    fast = GenerationConfig(ode_method="ab2", ar_attention="gqa")
+    fast = GenerationConfig(ode_method="ab2", ar_attention="gqa", nar_attention="fused")
     assert fast.to_dict()["ar_attention"] == "gqa" and fast.to_dict()["ode_method"] == "ab2"
+    assert fast.to_dict()["nar_attention"] == "fused"
     assert GenerationConfig.from_dict(fast.to_dict()) == fast
-    for bad in ({"ode_method": "euler"}, {"ar_attention": "flash"}):
+    for bad in ({"ode_method": "euler"}, {"ar_attention": "flash"}, {"nar_attention": "flash"}):
         with pytest.raises(ValueError):
             GenerationConfig(**bad)

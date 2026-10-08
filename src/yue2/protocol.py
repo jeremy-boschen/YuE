@@ -70,6 +70,13 @@ class GenerationConfig:
     #               faster on a whole song, but rounds differently, so the same seed
     #               writes a different take there.
     ar_attention: str = "standard"
+    # How the sound stage attends.
+    #   "standard"  the released behaviour: the profile's attention (on MPS, the Metal
+    #               flash kernel) over 256-row query blocks with the keys repeated
+    #   "fused"     PyTorch's own fused SDPA over all query rows at once, grouped heads
+    #               native. On MPS (M5 Pro) ~1.9x faster sound stage (48.6 -> 25.7 s on a
+    #               92 s song); rounds differently, latents correlate 0.9997 with standard.
+    nar_attention: str = "standard"
 
     def __post_init__(self):
         if self.context != CONTEXT or self.ode_method not in ODE_METHODS or type(self.ode_steps) is not int or self.ode_steps < 1:
@@ -78,13 +85,16 @@ class GenerationConfig:
             raise ValueError("rng_device must be 'auto', 'cpu' or 'device'")
         if self.ar_attention not in {"standard", "gqa"}:
             raise ValueError("ar_attention must be 'standard' or 'gqa'")
+        if self.nar_attention not in {"standard", "fused"}:
+            raise ValueError("nar_attention must be 'standard' or 'fused'")
 
     def to_dict(self):
-        # A default ar_attention is left out, so every config written before it existed
-        # reads, hashes and reproduces exactly as it did.
+        # A default ar_attention or nar_attention is left out, so every config written
+        # before it existed reads, hashes and reproduces exactly as it did.
         value = asdict(self)
-        if value["ar_attention"] == "standard":
-            del value["ar_attention"]
+        for key in ("ar_attention", "nar_attention"):
+            if value[key] == "standard":
+                del value[key]
         return value
 
     @classmethod

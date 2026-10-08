@@ -119,11 +119,14 @@ def song_chunks(prefix, codec, seed, context=CONTEXT, chunk_frames=None,
             for a, b, take in ranges]
 
 
-def attention(q, k, v, *, causal=False, backend="sdpa", query_chunk_size=None, operation=None):
+def attention(q, k, v, *, causal=False, backend="sdpa", query_chunk_size=None, operation=None,
+              native_groups=False):
     """Attend [tokens, heads, dim] tensors without materializing a song mask.
 
     CPU/MPS bound the number of query rows for a potential math SDPA fallback.
     CUDA normally uses PyTorch's fused SDPA without an external flash package.
+    ``native_groups`` keeps grouped K/V heads as they are on MPS too (enable_gqa)
+    instead of repeating them to every query head.
     """
     if backend not in {"sdpa", "math", "flash"}:
         raise ValueError("attention must be sdpa, math, or flash")
@@ -143,7 +146,7 @@ def attention(q, k, v, *, causal=False, backend="sdpa", query_chunk_size=None, o
     key = k.transpose(0, 1).unsqueeze(0)
     value = v.transpose(0, 1).unsqueeze(0)
     grouped = query.shape[1] != key.shape[1]
-    if grouped and q.device.type == "mps":
+    if grouped and q.device.type == "mps" and not native_groups:
         groups = query.shape[1] // key.shape[1]
         key, value = key.repeat_interleave(groups, 1), value.repeat_interleave(groups, 1)
         grouped = False
@@ -173,9 +176,11 @@ def attention(q, k, v, *, causal=False, backend="sdpa", query_chunk_size=None, o
 class CachedNAR:
     """One original acoustic chunk; AR prefix KV is invariant during the ODE."""
 
-    def __init__(self, model, chunk: Chunk, attention="sdpa", query_chunk_size=None, known=None):
+    def __init__(self, model, chunk: Chunk, attention="sdpa", query_chunk_size=None, known=None,
+                 fused=False):
         self.model, self.chunk = model, chunk
         self.backend, self.query_chunk_size = attention, query_chunk_size
+        self.fused = fused   # GenerationConfig.nar_attention "fused"
         self.known = None
         weight = next(model.vae2llm.parameters())
         self.device, self.dtype = weight.device, weight.dtype
@@ -205,6 +210,11 @@ class CachedNAR:
         self._prefill()
 
     def _attention(self, q, k, v, causal=False):
+        if self.fused:
+            # PyTorch's fused SDPA over every query row at once, grouped heads native: on
+            # MPS 4.5 ms vs the Metal flash kernel's 12.5 ms at a song's shape.
+            return attention(q, k, v, causal=causal, backend=self.backend, query_chunk_size=len(q),
+                             native_groups=True)
         return attention(q, k, v, causal=causal, backend=self.backend, query_chunk_size=self.query_chunk_size,
                          operation=self.model.profile.nar_attention if getattr(self.model, "profile", None) else None)
 
@@ -349,7 +359,7 @@ def synthesize(model, prefix: Sequence[int], codec: Sequence[int], seed: int,
                known_latents=None, blend_frames=0,
                on_progress: Callable[[int, int], None] | None = None,
                on_step: Callable[[FlowStep], None] | None = None, noise=None, start_step=0,
-               method="midpoint"):
+               method="midpoint", fused_attention=False):
     """Return CPU FP32 [frames,64] latents, solving original chunks serially.
 
     Defaults preserve the release protocol, including the single full-song chunk
@@ -395,7 +405,7 @@ def synthesize(model, prefix: Sequence[int], codec: Sequence[int], seed: int,
             known = torch.cat(output, dim=0)[-chunk.lead:]
             if len(known) != chunk.lead:
                 known = None
-        engine = CachedNAR(model, chunk, attention, query_chunk_size, known)
+        engine = CachedNAR(model, chunk, attention, query_chunk_size, known, fused=fused_attention)
         # Drop the prefix cache before restoring AR weights, including on
         # cancellation/failure, to keep the restoration memory peak bounded.
         with _offload_ar(model, offload_ar):

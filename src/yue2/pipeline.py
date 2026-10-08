@@ -400,7 +400,8 @@ class YuE2Pipeline:
                                 blend_frames=round(blend_seconds * 25),
                                 cancelled=cancelled, on_progress=report, on_step=on_step,
                                 noise=noise, start_step=start_step,
-                                method=self.generation_config.ode_method)
+                                method=self.generation_config.ode_method,
+                                fused_attention=self.generation_config.nar_attention == "fused")
             return result.detach().float().cpu().numpy()
 
     def close(self):
