@@ -294,9 +294,9 @@ class YuE2Pipeline:
                 from .fast import generate_vllm
                 result = generate_vllm(self, prefix, sampling, seed, phase, on_token=observed, **kwargs)
             else:
-                from .profiles import OfficialProfile
+                from .profiles import official_numerics
                 result = generate_tokens(model, prefix, sampling, seed, phase,
-                                         use_cuda_graph=self.backend != "torch-eager" and type(self.profile) is OfficialProfile,
+                                         use_cuda_graph=self.backend != "torch-eager" and official_numerics(self.profile),
                                          rng_device=self.profile.sampling_rng_device(self.generation_config.rng_device),
                                          on_token=observed, **kwargs)
             if result[2]:

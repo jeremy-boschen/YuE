@@ -74,10 +74,34 @@ class OfficialProfile:
                 'supports_continuation': self.supports_continuation}
 
 
+@dataclass(frozen=True)
+class OfficialContinuationProfile(OfficialProfile):
+    """Official numerics, with continuation allowed.
+
+    Every operation is OfficialProfile's own, so a take without a carry computes the same
+    bytes as 'official'. Only the policy differs: a take may continue an earlier one, and the
+    carried tokens seed the repetition-penalty window, as the ComfyUI profile does. A separate
+    name keeps 'official' itself (and the identity of takes made with it) unchanged.
+    """
+    name: str = field(default='official-continuation', init=False)
+    carry_penalty_history: bool = field(default=True, init=False)
+    supports_continuation: bool = field(default=True, init=False)
+
+    def identity(self):
+        return {**super().identity(), 'numerics': 'official'}
+
+
+def official_numerics(profile):
+    """Whether a profile computes exactly as OfficialProfile does (it may differ in policy)."""
+    return type(profile) in (OfficialProfile, OfficialContinuationProfile)
+
+
 def resolve_profile(profile):
     if isinstance(profile, str):
         if profile == 'official':
             return OfficialProfile()
+        if profile == 'official-continuation':
+            return OfficialContinuationProfile()
         if profile == 'comfyui-yue2-mps-v1':
             return ComfyUIYuE2MPSProfile()
         raise ValueError(f'Unknown numerical profile: {profile}')
@@ -88,4 +112,5 @@ def resolve_profile(profile):
 
 from .comfyui import ComfyUIYuE2MPSProfile
 
-__all__ = ['NumericalProfile', 'OfficialProfile', 'ComfyUIYuE2MPSProfile', 'resolve_profile']
+__all__ = ['NumericalProfile', 'OfficialProfile', 'OfficialContinuationProfile', 'ComfyUIYuE2MPSProfile',
+           'official_numerics', 'resolve_profile']

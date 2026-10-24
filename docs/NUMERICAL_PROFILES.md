@@ -31,6 +31,12 @@ profile enables those capabilities and retains the previously validated MPS
 cache-drain sequence. The cache drain is a compatibility choice, not a proven
 general upstream bug fix.
 
+`official-continuation` (`OfficialContinuationProfile`) runs every operation of
+`official` unchanged, so a take without a carry computes the same bytes, and only
+its policy differs: it supports continuation and feeds carried tokens into the
+repetition history, as the ComfyUI profile does. It has its own name and identity
+so takes made with `official` keep theirs. It runs on any device, including CUDA.
+
 The shared implementations remain reusable; profile policy is enforced at the
 pipeline boundary. Low-level sampling/NAR primitives are not standalone profile
 contracts. Empty model-ready hooks and provenance recording remain neutral API

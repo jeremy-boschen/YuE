@@ -2,7 +2,8 @@
 from dataclasses import FrozenInstanceError, dataclass
 import pytest
 import torch
-from yue2.profiles import OfficialProfile, ComfyUIYuE2MPSProfile, resolve_profile
+from yue2.profiles import (OfficialProfile, OfficialContinuationProfile, ComfyUIYuE2MPSProfile,
+                           official_numerics, resolve_profile)
 from yue2.modeling_yue2 import YuE2ForCausalLM, YuE2Config, RMSNorm, sdpa
 from yue2.modeling_vae import DecoderBlock
 
@@ -95,7 +96,8 @@ def test_pipeline_profile_roundtrip_and_custom_identity(tmp_path, monkeypatch):
     source.mkdir()
     monkeypatch.setattr(pipeline, 'copy_model_files', lambda a, b: b.mkdir(parents=True))
     monkeypatch.setattr(pipeline, 'resolve_model', lambda p, **kw: p)
-    for index, profile in enumerate((OfficialProfile(), ComfyUIYuE2MPSProfile(), ScaledProfile())):
+    for index, profile in enumerate((OfficialProfile(), OfficialContinuationProfile(), ComfyUIYuE2MPSProfile(),
+                                     ScaledProfile())):
         pipe = SmallPipeline(source, source, profile=profile)
         destination = tmp_path / str(index)
         pipe.save_pretrained(destination)
@@ -110,3 +112,47 @@ def test_pipeline_profile_roundtrip_and_custom_identity(tmp_path, monkeypatch):
             restored.profile = OfficialProfile()
         with pytest.raises(ValueError, match='differs'):
             SmallPipeline.from_pretrained(destination, progress=False, profile=ScaledProfile(name='other'))
+
+
+def test_official_continuation_computes_as_official_and_only_its_policy_differs():
+    torch.manual_seed(17)
+    official = YuE2ForCausalLM(config(), profile=OfficialProfile()).eval()
+    continuing = YuE2ForCausalLM(config(), profile=resolve_profile('official-continuation')).eval()
+    continuing.load_state_dict(official.state_dict())
+    ids = torch.tensor([[1, 2, 3]])
+    with torch.inference_mode():
+        assert torch.equal(continuing(ids, use_cache=False).logits, official(ids, use_cache=False).logits)
+    p, base = OfficialContinuationProfile(), OfficialProfile()
+    assert resolve_profile('official-continuation') == p
+    assert p.supports_continuation and p.carry_penalty_history
+    assert official_numerics(p) and official_numerics(base)
+    assert not official_numerics(ComfyUIYuE2MPSProfile()) and not official_numerics(ScaledProfile())
+    identity, reference = p.identity(), base.identity()
+    assert identity['name'] == 'official-continuation' and identity['numerics'] == 'official'
+    assert identity['operations'] == reference['operations']
+    assert identity['upstream_revision'] == reference['upstream_revision']
+    assert identity != reference
+    assert base.identity() == {**reference, 'carry_penalty_history': False, 'supports_continuation': False}
+    p.validate_continuation(carry=[1], chunk_seconds=1, known_latents=torch.zeros(2, 64))
+    p.validate(torch.device('cpu'), backend='torch', quantization='none', rng_device='auto')
+    with pytest.raises(ValueError, match='rng_device=auto'):
+        p.validate(torch.device('cpu'), backend='torch', quantization='none', rng_device='cpu')
+
+
+@pytest.mark.parametrize('name, graph', [('official', True), ('official-continuation', True),
+                                         ('comfyui-yue2-mps-v1', False)])
+def test_cuda_graph_follows_official_numerics(monkeypatch, name, graph):
+    from yue2 import pipeline
+    from yue2.protocol import GenerationConfig
+    seen = {}
+
+    def generate_tokens(*args, use_cuda_graph, **kwargs):
+        seen['graph'] = use_cuda_graph
+        return [], {}, False
+    monkeypatch.setattr(pipeline, 'generate_tokens', generate_tokens)
+    pipe = object.__new__(pipeline.YuE2Pipeline)
+    pipe._profile, pipe.backend, pipe.progress = resolve_profile(name), 'torch', False
+    pipe.generation_config = GenerationConfig()
+    pipe._load_model = lambda: None
+    pipe._generate([1], None, 0, 'semantic')
+    assert seen['graph'] is graph

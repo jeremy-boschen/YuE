@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from yue2 import modeling_yue2, modeling_vae, nar, sampling
-from yue2.profiles import OfficialProfile, ComfyUIYuE2MPSProfile
+from yue2.profiles import OfficialProfile, OfficialContinuationProfile, ComfyUIYuE2MPSProfile
 from yue2.protocol import Sampling, VOCAB_SIZE, CODEC_OFFSET
 
 UPSTREAM = 'bd90e4ccae671d869b3ecaca6d7e893927d29442'
@@ -113,6 +113,7 @@ def test_continuation_is_an_explicit_profile_capability(kwargs):
     with pytest.raises(ValueError, match='does not support'):
         OfficialProfile().validate_continuation(**kwargs)
     ComfyUIYuE2MPSProfile().validate_continuation(**kwargs)
+    OfficialContinuationProfile().validate_continuation(**kwargs)
 
 
 @pytest.mark.parametrize('requested', ['cpu', 'device'])
