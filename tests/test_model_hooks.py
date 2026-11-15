@@ -18,6 +18,7 @@ def make_pipe(model=None):
     pipe._model = model
     pipe.device = torch.device("cpu")
     pipe.quantization = None
+    pipe.low_vram = False
     pipe.load_timing = {}
     pipe.on_model_ready = []
     pipe._status = lambda *a, **k: nullcontext()

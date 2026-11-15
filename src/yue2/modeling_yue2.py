@@ -13,15 +13,55 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import GenerationMixin, PretrainedConfig, PreTrainedModel
+from transformers import __version__ as _transformers_version
 from transformers.cache_utils import DynamicCache
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 
-def sdpa(query, key, value, *, attn_mask=None, is_causal=False):
-    """Use native grouped-query attention, including a portable MPS fallback."""
+def _folded_gqa(query, key, value, attn_mask=None):
+    """Fold short noncausal query groups into rows, retaining the original KV storage."""
+    batch, heads, rows, dim = query.shape
+    groups = heads // key.shape[1]
+    if attn_mask is not None and attn_mask.shape[-2] != 1:
+        attn_mask = attn_mask.repeat(1, 1, groups, 1)
+    output = F.scaled_dot_product_attention(
+        query.reshape(batch, key.shape[1], groups * rows, dim), key, value, attn_mask=attn_mask)
+    return output.reshape(batch, heads, rows, dim)
+
+
+def sdpa_bd90e4c(query, key, value, *, attn_mask=None, is_causal=False):
+    """Grouped-query attention exactly as released at upstream bd90e4c.
+
+    The built-in numerical profiles (official, official-continuation and the ComfyUI
+    profile's stock paths) are defined against this operation. Upstream later added a
+    folded-GQA MPS path and a CUDA key repeat (see ``sdpa``), which round differently.
+    """
     grouped = query.shape[1] != key.shape[1]
     if grouped and query.device.type == "mps":
         # PyTorch's MPS attention does not implement enable_gqa on every release.
+        groups = query.shape[1] // key.shape[1]
+        key = key.repeat_interleave(groups, dim=1)
+        value = value.repeat_interleave(groups, dim=1)
+        grouped = False
+    return F.scaled_dot_product_attention(
+        query, key, value, attn_mask=attn_mask, is_causal=is_causal,
+        enable_gqa=grouped,
+    )
+
+
+def sdpa(query, key, value, *, attn_mask=None, is_causal=False):
+    """Use native GQA with portable fallbacks for MPS and CUDA builds."""
+    grouped = query.shape[1] != key.shape[1]
+    if grouped and query.device.type == "mps":
+        if (not is_causal and query.shape[1] * query.shape[2] <= 8 * key.shape[1]
+                and (attn_mask is None or (attn_mask.ndim == 4 and attn_mask.shape[1] == 1
+                     and attn_mask.shape[2] in (1, query.shape[2])))):
+            return _folded_gqa(query, key, value, attn_mask)
+    expand_kv = query.device.type == "mps" or (
+        query.device.type == "cuda" and torch.version.hip is None
+        and not torch.backends.cuda.is_flash_attention_available())
+    if grouped and expand_kv:
+        # Memory-efficient CUDA SDPA needs matching heads on builds without FlashAttention.
         groups = query.shape[1] // key.shape[1]
         key = key.repeat_interleave(groups, dim=1)
         value = value.repeat_interleave(groups, dim=1)
@@ -210,7 +250,18 @@ class Attention(nn.Module):
         q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
 
         if past_key_value is not None:
-            k, v = past_key_value.update(k, v, layer_idx, {"cache_position": cache_position})
+            # Upstream's MPS decode buckets (a padded cache read under a mask) round
+            # differently from an exact-length read, so a profile opts in to them.
+            # Every built-in profile keeps the exact-length read it was validated on.
+            buckets = self.profile is None or getattr(self.profile, "ar_decode_buckets", False)
+            cache_kwargs = {"cache_position": cache_position,
+                            "fixed_shape": attention_mask is None and buckets}
+            # The append-only cache tracks used lengths on the host. No scalar
+            # device read is needed here, including on CUDA and XPU.
+            used = past_key_value.get_seq_length() + T if isinstance(past_key_value, StaticKVCache) else None
+            k, v = past_key_value.update(k, v, layer_idx, cache_kwargs)
+            if used is not None and k.shape[2] > used and attention_mask is None:
+                attention_mask = torch.arange(k.shape[2], device=x.device)[None, None, None, :] < used
 
         operation = self.profile.ar_attention if self.profile is not None else sdpa
         if self.decode_gqa and T == 1 and attention_mask is None:
@@ -218,8 +269,15 @@ class Attention(nn.Module):
             out = F.scaled_dot_product_attention(q, k, v, enable_gqa=True)
         elif attention_mask is not None:
             out = operation(q, k, v, attn_mask=attention_mask[..., :k.shape[2]])
+        elif T == 1:
+            # Single-token decode is never causal. Keep SDPA kwargs static bools
+            # so torch.compile traces the layer loop as one graph; symbolic
+            # shape comparisons in is_causal break the graph per layer.
+            out = operation(q, k, v, is_causal=False)
+        elif k.shape[2] == T:
+            out = operation(q, k, v, is_causal=True)
         else:
-            out = operation(q, k, v, is_causal=(T > 1 and k.shape[2] == T))
+            out = operation(q, k, v, is_causal=False)
         return self.o_proj(out.transpose(1, 2).reshape(B, T, -1))
 
 
@@ -387,6 +445,17 @@ class StaticKVCache:
             for _ in range(num_layers)
         ]
 
+    MPS_DECODE_BUCKET = 2048
+
+    def _bucket_decode(self, key_states):
+        return key_states.device.type == "mps"
+
+    def _mps_decode_length(self, used):
+        bucket = self.MPS_DECODE_BUCKET
+        while bucket < used:
+            bucket *= 2
+        return min(bucket, self.max_seq_len)
+
     def get_seq_length(self, layer_idx=0) -> int:
         return self._seen_tokens
 
@@ -400,7 +469,9 @@ class StaticKVCache:
         self.value_cache[layer_idx][:, :, pos:end] = value_states
         if layer_idx == self.num_layers - 1:
             self._seen_tokens = end
-        return self.key_cache[layer_idx][:, :, :end], self.value_cache[layer_idx][:, :, :end]
+        fixed_shape = (cache_kwargs or {}).get("fixed_shape", True)
+        length = self._mps_decode_length(end) if T == 1 and fixed_shape and self._bucket_decode(key_states) else end
+        return self.key_cache[layer_idx][:, :, :length], self.value_cache[layer_idx][:, :, :length]
 
     def reset(self):
         self._seen_tokens = 0
@@ -472,6 +543,11 @@ class YuE2PreTrainedModel(PreTrainedModel):
 class YuE2ForCausalLM(YuE2PreTrainedModel, GenerationMixin):
     """YuE2 model: AR causal LM (generate) + NAR flow matching (ODE)."""
 
+    # Transformers 5 (our pinned runtime) expects {target: source}; 4.x a list of targets.
+    # Only consulted when config.tie_word_embeddings is set; the YuE2-3B checkpoint leaves it off.
+    _tied_weights_keys = ({"lm_head.weight": "model.embed_tokens.weight"}
+                          if int(_transformers_version.split(".")[0]) >= 5 else ["lm_head.weight"])
+
     def __init__(self, config: YuE2Config, profile=None):
         super().__init__(config)
         self.profile = profile
@@ -514,6 +590,8 @@ class YuE2ForCausalLM(YuE2PreTrainedModel, GenerationMixin):
         return_dict: Optional[bool] = None,
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
+        if labels is not None and (not isinstance(logits_to_keep, int) or logits_to_keep != 0):
+            raise ValueError("Loss computation requires logits_to_keep=0")
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("Supply exactly one of input_ids or inputs_embeds")
         use_cache = use_cache if use_cache is not None else getattr(self.config, "use_cache", True)
@@ -528,6 +606,10 @@ class YuE2ForCausalLM(YuE2PreTrainedModel, GenerationMixin):
             cache_position = torch.arange(past_len, past_len + seq_len, device=device)
         else:
             cache_position = cache_position.to(device=device, dtype=torch.long)
+            if use_cache and isinstance(past_key_values, StaticKVCache):
+                append_positions = torch.arange(past_len, past_len + seq_len, device=device)
+                if not torch.equal(cache_position, append_positions):
+                    raise ValueError("StaticKVCache supports append positions only; use Transformers StaticCache for other slots")
         if cache_position.ndim != 1 or cache_position.numel() != seq_len:
             raise ValueError("cache_position must identify each current token's physical cache slot")
         if position_ids is None:

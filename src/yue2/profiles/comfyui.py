@@ -95,5 +95,5 @@ class ComfyUIYuE2MPSProfile(OfficialProfile):
         import json
         from pathlib import Path
         return {**super().identity(), 'reference': json.loads(
-            Path(__file__).with_name('comfyui_reference.json').read_text()),
+            Path(__file__).with_name('comfyui_reference.json').read_text(encoding='utf-8')),
             'attention_thresholds': {'min_seq': 4096, 'fast_min_seq': 1024, 'min_score_bytes': 12 * 1024**3}}

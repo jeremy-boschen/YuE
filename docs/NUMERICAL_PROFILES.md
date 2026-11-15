@@ -72,6 +72,17 @@ numerical behavior requires a new profile version and its own exact fixtures.
 Profiles do not promise identity across hardware or arbitrary package upgrades.
 Song input formatting, output file encoding and album lineage belong to callers.
 
+## Upstream 1116bea merge
+
+Upstream later changed grouped-query attention on MPS (a folded-GQA path for short
+noncausal queries), repeated K/V heads on CUDA builds without FlashAttention, and
+read the MPS decode cache in padded power-of-two buckets under a mask. The built-in
+profiles keep the released operation (`modeling_yue2.sdpa_bd90e4c`) and exact-length
+cache reads (`ar_decode_buckets = False`); a caller profile may opt in to buckets.
+Acoustic attention keeps the released repeat-on-MPS path. Upstream's opt-in
+`YUE2_COMPILE` (compiled decode) and `YUE2_XPUGRAPH` change execution and must stay
+unset for parity with recorded takes.
+
 ## Caller-supplied profiles
 
 Pass an object implementing `yue2.profiles.NumericalProfile`. The protocol owns

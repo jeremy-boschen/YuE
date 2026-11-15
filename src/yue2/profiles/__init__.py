@@ -33,9 +33,12 @@ class OfficialProfile:
         import torch
         return x * torch.rsqrt(x.float().pow(2).mean(-1, keepdim=True) + eps).to(x.dtype) * weight
 
+    # Upstream's MPS decode cache buckets change rounding; the released read is exact-length.
+    ar_decode_buckets = False
+
     def ar_attention(self, query, key, value, **kwargs):
-        from ..modeling_yue2 import sdpa
-        return sdpa(query, key, value, **kwargs)
+        from ..modeling_yue2 import sdpa_bd90e4c
+        return sdpa_bd90e4c(query, key, value, **kwargs)
 
     def nar_attention(self, query, key, value, **kwargs):
         from torch.nn.functional import scaled_dot_product_attention

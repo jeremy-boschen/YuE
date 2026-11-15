@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 
 
@@ -24,9 +25,15 @@ def identity(value):
 def write_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
-    os.replace(temporary, path)
+    rendered = json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+    stream = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=path.name + ".", suffix=".tmp", delete=False)
+    try:
+        with stream:
+            stream.write(rendered)
+        os.replace(stream.name, path)
+    finally:
+        Path(stream.name).unlink(missing_ok=True)
 
 
 # Explicit public model files. Extra reports, caches and arbitrary code are not exported.
@@ -59,15 +66,19 @@ def copy_model_files(source, destination):
     source, destination = Path(source).resolve(), Path(destination)
     if destination.exists() and any(destination.iterdir()):
         raise FileExistsError("save_pretrained needs an empty model destination")
-    config = json.loads((source / "config.json").read_text())
+    config = json.loads((source / "config.json").read_text(encoding="utf-8"))
     kind = config.get("model_type")
     if kind == "yue2":
         from .modeling_yue2 import YuE2Config
         clean_config = YuE2Config(**config).to_dict()
+        clean_config["auto_map"] = {"AutoConfig": "modeling_yue2.YuE2Config",
+                                    "AutoModelForCausalLM": "modeling_yue2.YuE2ForCausalLM"}
         code_name = "modeling_yue2.py"
     elif kind == "yue2_vae":
         from .modeling_vae import YuE2VAEConfig
         clean_config = YuE2VAEConfig(**config).to_dict()
+        clean_config["auto_map"] = {"AutoConfig": "modeling_vae.YuE2VAEConfig",
+                                    "AutoModel": "modeling_vae.YuE2VAE"}
         code_name = "modeling_vae.py"
     else:
         raise ValueError("Unsupported model configuration")
@@ -82,11 +93,11 @@ def copy_model_files(source, destination):
         if file.is_file():
             if name == "yue2_generation_config.json":
                 from .protocol import GenerationConfig
-                write_json(destination / name, GenerationConfig.from_dict(json.loads(file.read_text())).to_dict())
+                write_json(destination / name, GenerationConfig.from_dict(json.loads(file.read_text(encoding="utf-8"))).to_dict())
             elif name == "generation_config.json":
                 from transformers import GenerationConfig as HFGenerationConfig
                 known = HFGenerationConfig().to_dict()
-                value = {key: value for key, value in json.loads(file.read_text()).items()
+                value = {key: value for key, value in json.loads(file.read_text(encoding="utf-8")).items()
                          if key in known and not key.startswith("_")}
                 write_json(destination / name, value)
             else:
@@ -105,7 +116,7 @@ def copy_model_files(source, destination):
 def model_identity(path, verify=True):
     path = Path(path)
     manifest = path / "weights_manifest.json"
-    expected = json.loads(manifest.read_text()) if manifest.exists() else None
+    expected = json.loads(manifest.read_text(encoding="utf-8")) if manifest.exists() else None
     files = sorted(path.glob("*.safetensors"))
     if not files:
         raise FileNotFoundError(f"No safetensors weights in {path}")
@@ -113,8 +124,10 @@ def model_identity(path, verify=True):
     for file in files:
         digest = sha256_file(file)
         if verify and expected is not None:
-            wanted = expected.get("files", {}).get(file.name, {}).get("sha256")
-            if wanted != digest:
+            record = expected.get("files", {}).get(file.name, {})
+            wanted = record.get("sha256")
+            size = record.get("bytes")
+            if wanted != digest or type(size) is not int or size != file.stat().st_size:
                 raise ValueError(f"Weight integrity failed: {file.name}")
         entries[file.name] = {"sha256": digest, "bytes": file.stat().st_size}
     if expected is not None and set(entries) != set(expected.get("files", {})):
@@ -124,13 +137,15 @@ def model_identity(path, verify=True):
 
 def collect_hashes(directory, exclude=("result.json",)):
     directory = Path(directory)
-    return {str(p.relative_to(directory)): {"sha256": sha256_file(p), "bytes": p.stat().st_size}
-            for p in sorted(directory.rglob("*")) if p.is_file() and p.name not in exclude}
+    excluded = {Path(name).as_posix() for name in exclude}
+    return {p.relative_to(directory).as_posix(): {"sha256": sha256_file(p), "bytes": p.stat().st_size}
+            for p in sorted(directory.rglob("*"))
+            if p.is_file() and p.relative_to(directory).as_posix() not in excluded}
 
 
 def verify_result(directory, expected_identity=None):
     directory = Path(directory)
-    result = json.loads((directory / "result.json").read_text())
+    result = json.loads((directory / "result.json").read_text(encoding="utf-8"))
     if result.get("status") != "complete":
         raise ValueError("Saved request did not complete")
     if expected_identity is not None and result.get("identity") != expected_identity:

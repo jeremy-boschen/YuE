@@ -11,18 +11,24 @@ import hashlib
 from pathlib import Path
 import subprocess
 import sys
-import tomllib
 import zipfile
 
 
-def build(root: Path, output: Path) -> list[Path]:
+SKILL_FILES = frozenset({
+    "SKILL.md", "LICENSE", "agents/openai.yaml", "assets/edit-brief.md", "assets/prompt.json",
+    "scripts/abc_tools.py", "scripts/common.py", "scripts/listen.py", "scripts/run_yue2.py", "scripts/transcribe.py",
+    "references/abc-editing.md", "references/editing-workflows.md", "references/generation-and-covers.md",
+    "references/listening-and-evaluation.md", "references/models-and-setup.md",
+})
+
+
+def build_skill(root: Path, output: Path) -> Path:
     output.mkdir(parents=True, exist_ok=True)
-    version = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+    skill = root / "skills" / "yue2-music"
     subprocess.run(
-        [sys.executable, "-m", "build", "--no-isolation", "--outdir", str(output), str(root)],
+        [sys.executable, "-B", str(skill / "instrumental/scripts/verify_bundle.py"), "--strict"],
         check=True,
     )
-    skill = root / "skills" / "yue2-music"
     members = []
     for path in sorted(skill.rglob("*")):
         relative = path.relative_to(skill)
@@ -32,11 +38,12 @@ def build(root: Path, output: Path) -> list[Path]:
             raise ValueError(f"Symlinks cannot be distributed: {relative}")
         if not path.is_file() or path.suffix == ".pyc":
             continue
-        if relative.parts[0] not in {"SKILL.md", "LICENSE", "agents", "assets", "references", "scripts"}:
+        if relative.parts[0] != "instrumental" and relative.as_posix() not in SKILL_FILES:
             raise ValueError(f"Unexpected skill file: {relative}")
         members.append((path, "yue2-music/" + relative.as_posix()))
-    if not any(name == "yue2-music/SKILL.md" for _, name in members):
-        raise ValueError("Missing skill entrypoint")
+    present = {name.removeprefix("yue2-music/") for _, name in members}
+    if not SKILL_FILES <= present:
+        raise ValueError(f"Missing skill files: {sorted(SKILL_FILES - present)}")
     archive = output / "yue2-music.zip"
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as package:
         for path, name in members:
@@ -49,19 +56,41 @@ def build(root: Path, output: Path) -> list[Path]:
         assert set(package.namelist()) == {name for _, name in members}
         for path, name in members:
             assert package.read(name) == path.read_bytes()
-    artifacts = [output / f"yue2_infer-{version}-py3-none-any.whl",
-                 output / f"yue2_infer-{version}.tar.gz", archive]
+    return archive
+
+
+def write_checksums(output: Path, artifacts: list[Path]) -> None:
     hashes = []
     for path in artifacts:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         hashes.append(f"{digest}  {path.name}\n")
     (output / "SHA256SUMS").write_text("".join(hashes))
+
+
+def build(root: Path, output: Path) -> list[Path]:
+    import tomllib
+    archive = build_skill(root, output)
+    version = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+    subprocess.run(
+        [sys.executable, "-m", "build", "--no-isolation", "--outdir", str(output), str(root)],
+        check=True,
+    )
+    artifacts = [output / f"yue2_infer-{version}-py3-none-any.whl",
+                 output / f"yue2_infer-{version}.tar.gz", archive]
+    write_checksums(output, artifacts)
     return artifacts
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("dist"))
+    parser.add_argument("--skill-only", action="store_true", help="Package the skill without rebuilding the Python runtime")
     args = parser.parse_args()
-    for artifact in build(Path(__file__).resolve().parents[1], args.output.resolve()):
+    root, output = Path(__file__).resolve().parents[1], args.output.resolve()
+    if args.skill_only:
+        artifacts = [build_skill(root, output)]
+        write_checksums(output, artifacts)
+    else:
+        artifacts = build(root, output)
+    for artifact in artifacts:
         print(artifact.name)

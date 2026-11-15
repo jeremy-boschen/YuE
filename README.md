@@ -16,8 +16,12 @@
 <p align="center"><strong>Compose in symbols. Create in sound.</strong></p>
 
 <p align="center">
+  <a href="https://arxiv.org/abs/2609.33757">📄 arXiv</a> ·
+  <a href="docs/technical_report.pdf">PDF</a> ·
   <a href="https://map-yue2.github.io/">🎧 Demos</a> ·
+  <a href="https://yue.noizai.net/">🚀 Try online (free)</a> ·
   <a href="https://arena.3-148-255-99.sslip.io:8080">🗳️ Music Arena</a> ·
+  <a href="#news">📰 News</a> ·
   <a href="https://huggingface.co/m-a-p/YuE2-3B">🤗 YuE2</a> ·
   <a href="#quick-start">🚀 Quick start</a> ·
   <a href="#agent-skill">🤖 Agent skill</a> ·
@@ -29,15 +33,34 @@
   <a href="https://discord.gg/ssAyWMnMzu"><img alt="Join us on Discord" src="https://img.shields.io/discord/842440537755353128?color=5865F2&amp;logo=discord&amp;logoColor=white&amp;label=Discord&amp;style=flat-square" height="20" /></a>
 </p>
 
+<p align="center">
+  <a href="https://trendshift.io/repositories/32209">
+    <img src="https://trendshift.io/api/badge/repositories/32209" alt="YuE — GitHub Trending #1 Repository of the Day" width="250" height="55" />
+  </a>
+  <br />
+  <sub>All languages · September 14, 2026</sub>
+</p>
+
+<p align="center">
+  <a href="https://web.archive.org/web/20260917003427/https://huggingface.co/models?sort=trending">
+    <img src="https://img.shields.io/static/v1?label=HF%20Global%20Trending&amp;message=Reached%20%233&amp;color=FFD21E&amp;logo=huggingface&amp;logoColor=FFD21E" alt="Hugging Face Global Model Trending: reached #3 on September 17, 2026" height="20" />
+  </a>
+  <a href="https://huggingface.co/models?pipeline_tag=text-to-audio&amp;sort=trending">
+    <img src="https://img.shields.io/static/v1?label=HF%20Text-to-Audio%20Trending&amp;message=Reached%20%231&amp;color=FFD21E&amp;logo=huggingface&amp;logoColor=FFD21E" alt="Hugging Face Text-to-Audio Trending: reached #1 on September 20, 2026" height="20" />
+  </a>
+  <br />
+  <sub>Global: September 17, 2026 · Text-to-Audio: September 20, 2026</sub>
+</p>
+
 **YuE2 brings frontier song quality to music generation with an editable composition.** Give it lyrics and a style prompt: it writes a melody-and-chord plan, then realizes that plan as a complete song with vocals and accompaniment.
 
 <a id="music-arena"></a>
 
 > **🎧 YuE2 needs your ears**
 >
-> We're running a public listening study comparing YuE2 with leading proprietary music generation systems. Listen to anonymous music clips and choose A, B, or a tie. Your honest feedback helps us understand how YuE2 sounds to real listeners.
+> We're running a public blind listening study comparing YuE2 with leading proprietary music generation systems. Hear anonymous clips and choose A, B, or a tie.
 >
-> **[Listen & vote →](https://arena.3-148-255-99.sslip.io:8080)** · No account needed. Headphones recommended.
+> **[Listen & vote →](https://arena.3-148-255-99.sslip.io:8080)** · No account needed; headphones recommended.
 
 - **Frontier quality.** YuE2 is competitive with Suno v5/v6 on WildSongBench. YuE2 (best-of-8) achieves **6.9632 SongBench Avg**, the highest observed mean among all evaluated settings.
 - **White-box music generation through symbolic planning.** Read, play, and change the composition before rendering it. Melody and chords become explicit controls that a person or an agent can inspect and edit.
@@ -46,6 +69,21 @@
 [![YuE2 song quality and text alignment on WildSongBench](assets/frontier-teaser.png)](https://map-yue2.github.io/#model-overview)
 
 *192 WildSongBench prompts. Both YuE2 settings use symbolic planning. Bo8 = best-of-8. The axes are normalized comparison indices; bubble area represents AudioBox production quality. [Scores and evaluation protocol](docs/benchmarks.md). [Vector PDF](assets/frontier-teaser.pdf) · [SVG](assets/frontier-teaser.svg).*
+
+## News
+
+- **📄 October 6, 2026 — SheetSage2 on arXiv.** Read the [paper](https://arxiv.org/abs/2610.05336) and use the [BibTeX citation](#citation).
+
+- **📄 October 2, 2026 — SheetSage2 technical report.** The [SheetSage2 report](docs/sheetsage2_technical_report.pdf) describes the transcription model used for covers and score editing: MIDI-derived synthetic supervision, structured decoding, and autoregressive distillation, with evaluations on eight benchmark collections.
+
+- **📄 September 29, 2026 — YuE2 on arXiv.** Read the [paper](https://arxiv.org/abs/2609.33757) and use the [BibTeX citation](#citation).
+
+- **📄 September 26, 2026 — YuE2 technical report.** Our [technical report](https://arxiv.org/abs/2609.33757) is now available, with the full model and training methods, automatic and expert listening results, and evaluations of score editing and zero-shot covers.
+- **🎹 September 25, 2026 — Instrumental generation and covers.** The [yue2-music agent skill](#agent-skill) now turns a simple description, ABC score, or reference recording into instrumental music. YuE2 writes the score by default; the skill moves the vocal melody into the instrumental part before rendering. **Recommended agent: GPT-6 Astra.** [Download the updated skill →](https://github.com/multimodal-art-projection/YuE/releases/download/yue2-music-v1.2.0/yue2-music.zip)
+- **🚀 Try YuE2 online for free.** Create a song in your browser with the [NOIZ-hosted demo →](https://yue.noizai.net/). No installation required.
+- **⚡ YuE2-Turbo.** [NOIZ's inference and serving toolkit →](https://github.com/NoizAI/YuE2-Turbo) accelerates YuE2 and supports concurrent requests.
+- **🎛️ ComfyUI.** YuE2 has native nodes and an [official text-to-music workflow →](https://github.com/Comfy-Org/workflow_templates/blob/main/templates/audio_yue2_text2music.json).
+- **🎬 Maestro.** [Maestro →](https://github.com/Blizaine/Maestro) includes YuE2 for local song generation, composition planning, and covers. [Creator's post →](https://x.com/blizaine/status/2101852048538968458)
 
 ## Hear what you can make
 
@@ -67,6 +105,8 @@ The staged Python API exposes `plan()` → `generate_semantic()` → `synthesize
 ## Quick start
 
 **Linux · Python 3.12 · NVIDIA GPU with BF16 support and 24 GB VRAM.** YuE2 produces 48 kHz stereo audio without quantization. Model files download from Hugging Face on first use.
+
+For experimental low-memory, Windows, AMD, Apple Silicon and Intel paths, see [hardware setup and validation scope](docs/hardware.md).
 
 ```bash
 git clone https://github.com/multimodal-art-projection/YuE.git
@@ -150,9 +190,19 @@ The editable score is the white-box interface: you can inspect the intended comp
 
 ## Agent skill
 
-The **[yue2-music skill](skills/yue2-music/SKILL.md)** teaches an agent how to generate songs, transcribe and cover recordings, edit ABC scores, check musical invariants, and organize listening comparisons. It includes portable helpers and references to the released model interfaces.
+The **[yue2-music skill](skills/yue2-music/SKILL.md)** teaches an agent how to generate songs and instrumental music, transcribe and cover recordings, edit ABC scores, check musical invariants, and organize listening comparisons. **We recommend GPT-6 Astra as the agent.** YuE2 remains the model that composes the default score and generates the audio.
 
-Use **`skills/yue2-music/` from this repository** with an agent that supports `SKILL.md` packages. Install it using your agent's skill-directory or import mechanism; the Python runtime is installed separately with `pip install .`. The earlier [v0.1.6 skill ZIP](https://github.com/multimodal-art-projection/YuE/releases/download/yue2-v0.1.6/yue2-music.zip) remains available under its bundled license.
+Use **`skills/yue2-music/` from this repository** or download the **[updated skill ZIP](https://github.com/multimodal-art-projection/YuE/releases/download/yue2-music-v1.2.0/yue2-music.zip)**. Install it using your agent's skill-directory or import mechanism. The song workflow uses the Python runtime installed with `pip install .`; the [instrumental workflow](skills/yue2-music/instrumental/SKILL.md) includes its own pinned setup recipe for the agent to follow. The earlier v0.1.6 release remains unchanged.
+
+For instrumental music, give the agent a simple request:
+
+> Use the yue2-music skill to create gentle piano instrumental music for reading, with no vocals. Give me the playable audio and the full prompt.
+
+For an instrumental cover, attach a reference recording or ABC score:
+
+> Turn this melody into an acoustic-guitar instrumental cover. Keep the melody and give me the audio and full prompt.
+
+The default flow is **YuE2 score → move Vocal notes to Ins → render**. Audio covers first use SheetSage2 to transcribe the reference. The agent composes a new score only when explicitly asked. The helpers preserve vocal-note pitches, onsets, and durations in the converted score and record overlapping parts; listening is still needed to check for vocal leakage and audible melody fidelity.
 
 Try a concrete request:
 
@@ -194,20 +244,22 @@ To reproduce the reported benchmark scores, follow the instructions on [🤗 Wil
 
 ## MERT2
 
-**State-of-the-art music understanding:** SOTA on **14 of 15 MARBLE metrics**, with **91.72% genre accuracy on GTZAN**.
+**State-of-the-art music understanding:** MERT2-30s leads on **14 of 15 MARBLE metrics**, and MERT2-FS (full-song) leads on **13 of 15**, each against the listed external baselines. MERT2-30s reaches **91.72% genre accuracy on GTZAN**.
 
 [Demo and results](https://map-yue2.github.io/#mert2) · [🤗 MERT2-30s](https://huggingface.co/m-a-p/MERT-v2-30s) · [🤗 MERT2-FS](https://huggingface.co/m-a-p/MERT-v2-FullSong)
 
 ## SheetSage2
 
-**State-of-the-art audio-to-score transcription:** SOTA on **10 of 13 benchmark metrics**, with **82.51% vocal melody pitch-class F1 on RWC-Pop**.
+**State-of-the-art audio-to-score transcription:** SheetSage2-AR leads on **12 of 15 benchmark metrics** in the reported comparison, including JAAH chord recognition and Rock Corpus vocal melody transcription. Vocal melody pitch-class F1 is **82.51% on RWC-Pop** and **67.08% on Rock Corpus**.
 
-[Demo and results](https://map-yue2.github.io/#sheetsage2) · [🤗 Model and inference](https://huggingface.co/m-a-p/SheetSage2)
+[📄 arXiv](https://arxiv.org/abs/2610.05336) · [PDF](docs/sheetsage2_technical_report.pdf) · [Demo and results](https://map-yue2.github.io/#sheetsage2) · [🤗 Model and inference](https://huggingface.co/m-a-p/SheetSage2)
 
 ## Models and resources
 
 | Resource | Purpose |
 |---|---|
+| [📄 YuE2 technical report](https://arxiv.org/abs/2609.33757) | Model, training, and evaluation details |
+| [📄 SheetSage2 paper](https://arxiv.org/abs/2610.05336) | Transcription method, training, and evaluation details |
 | [🤗 YuE2-3B](https://huggingface.co/m-a-p/YuE2-3B) | Song generation, symbolic planning, covering, and editing |
 | [🤗 YuE2-Vae](https://huggingface.co/m-a-p/YuE2-Vae) | Default generation and listening decoder |
 | [🤗 YuE2-Vae-legacy](https://huggingface.co/m-a-p/YuE2-Vae-legacy) | Decoder for the reported benchmark protocol |
@@ -236,7 +288,36 @@ We strongly encourage crediting **YuE2** or using **#YuE2** when sharing generat
 
 ## Citation
 
-The YuE2 technical report is coming soon. For now, please cite **[MERT](https://arxiv.org/abs/2306.00107)** and **[YuE](https://arxiv.org/abs/2503.08638)**:
+Please cite the [YuE2 paper](https://arxiv.org/abs/2609.33757) when using YuE2, MERT2, or WildSongBench:
+
+```bibtex
+@article{yuan2026yue2,
+  title = {{YuE2}: Unifying Symbolic and Audio Music Generation at Frontier Quality},
+  author = {Yuan, Ruibin and Pan, Jiahao and Jiang, Junyan and Wu, Zhiyue and Zhou, Ziya and Sun, Jiankai and Li, Yizhi and Zhang, Ge and Gu, Yicheng and Tian, Zeyue and Dai, Junyu and Lin, Hanfeng and Li, Kai and Wu, Shangda and Liu, Xuanjie and Wang, Jiaming and Liu, Zihan and Wang, Yue and Ma, Yinghao and Yin, Hanzhi and Chen, Kangrui and Zhang, Xinyue and Ma, Ziyang and Liao, Mengqi and Zhao, Hejia and Huang, Guowei and Yan, Chao and Ke, Lei and Yu, Jianwei and Liu, Bei and Guo, Joe and Xue, Liumeng and Xia, Gus and Xue, Wei and Guo, Yike},
+  journal = {arXiv preprint arXiv:2609.33757},
+  year = {2026},
+  eprint = {2609.33757},
+  archivePrefix = {arXiv},
+  primaryClass = {eess.AS},
+  url = {https://arxiv.org/abs/2609.33757}
+}
+```
+
+When using SheetSage2, please cite the [SheetSage2 paper](https://arxiv.org/abs/2610.05336):
+
+```bibtex
+@misc{jiang2026sheetsage2,
+  title = {{SheetSage2}: Coherent Lead-Sheet Transcription with Synthetic Supervision},
+  author = {Jiang, Junyan and Yuan, Ruibin and Pan, Jiahao and Xue, Wei and Guo, Yike and Xia, Gus and LeCun, Yann},
+  year = {2026},
+  eprint = {2610.05336},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.SD},
+  url = {https://arxiv.org/abs/2610.05336}
+}
+```
+
+For the original **[MERT](https://arxiv.org/abs/2306.00107)** and **[YuE](https://arxiv.org/abs/2503.08638)** models, please cite:
 
 ```bibtex
 @article{li2023mert,
@@ -260,36 +341,32 @@ The YuE2 technical report is coming soon. For now, please cite **[MERT](https://
 }
 ```
 
+Community-maintained tools and integrations: [awesome-YuE](https://github.com/RevolutionLA/awesome-YuE).
+
 ## Contact
 
 <table>
   <tr>
-    <td align="center" width="50%">
-      <strong><img src="assets/wechat.svg" width="20" height="20" alt="" />&nbsp;WeChat</strong><br>
-      <sub>Chinese-speaking users</sub>
+    <td width="50%" valign="top">
+      <strong>💬 Community</strong><br>
+      <sub><a href="https://discord.gg/ssAyWMnMzu">Join us on Discord ↗</a></sub>
     </td>
-    <td align="center" width="50%">
-      <a href="https://discord.gg/ssAyWMnMzu"><strong><img src="assets/discord.svg" width="20" height="20" alt="" />&nbsp;Join&nbsp;Discord</strong></a><br>
-      <sub>Global users</sub>
+    <td width="50%" valign="top">
+      <strong>✉️ Licensing inquiries</strong><br>
+      <sub><a href="mailto:lauryliuyang@hkgai.org">lauryliuyang@hkgai.org</a></sub>
     </td>
   </tr>
   <tr>
-    <td align="center" colspan="2">
-      <details>
-        <summary><strong>Show WeChat QR code</strong></summary>
-        <br>
-        <a href="assets/wechat-yue2-group.png">
-          <img src="assets/wechat-yue2-group.png" alt="YuE2 WeChat group QR code" width="240" />
-        </a><br>
-        <sub>Click to enlarge<br>Valid until Sep 23, 2026</sub>
-      </details>
+    <td width="50%" valign="top">
+      <strong>🤝 Data partnerships</strong><br>
+      <sub><a href="mailto:gezhang@umich.edu">gezhang@umich.edu</a></sub>
+    </td>
+    <td width="50%" valign="top">
+      <strong>🎓 Academic collaboration</strong><br>
+      <sub><a href="mailto:ryuanab@connect.ust.hk">ryuanab@connect.ust.hk</a></sub>
     </td>
   </tr>
 </table>
-
-- **Licensing inquiries:** [lauryliuyang@hkgai.org](mailto:lauryliuyang@hkgai.org)
-- **Data partnerships:** [gezhang@umich.edu](mailto:gezhang@umich.edu)
-- **Academic collaboration:** [ryuanab@connect.ust.hk](mailto:ryuanab@connect.ust.hk)
 
 ### Numerical profiles
 

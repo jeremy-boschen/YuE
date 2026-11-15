@@ -156,3 +156,18 @@ def test_cuda_graph_follows_official_numerics(monkeypatch, name, graph):
     pipe._load_model = lambda: None
     pipe._generate([1], None, 0, 'semantic')
     assert seen['graph'] is graph
+
+
+def test_builtin_profiles_keep_the_released_attention_and_exact_length_cache_reads(monkeypatch):
+    """Upstream 1116bea added folded-GQA MPS attention and padded MPS decode buckets.
+    The built-in profiles stay on the bd90e4c operation and exact-length reads."""
+    from yue2 import modeling_yue2
+    from yue2.profiles import OfficialProfile, OfficialContinuationProfile, ComfyUIYuE2MPSProfile
+    for profile in (OfficialProfile(), OfficialContinuationProfile(), ComfyUIYuE2MPSProfile()):
+        assert profile.ar_decode_buckets is False
+    seen = []
+    monkeypatch.setattr(modeling_yue2, "sdpa_bd90e4c",
+                        lambda q, k, v, **kw: seen.append(k.shape[2]) or torch.zeros_like(q))
+    monkeypatch.setattr(modeling_yue2, "sdpa", lambda *a, **kw: pytest.fail("upstream sdpa used"))
+    OfficialProfile().ar_attention(torch.zeros(1, 4, 1, 8), torch.zeros(1, 2, 3, 8), torch.zeros(1, 2, 3, 8))
+    assert seen == [3]

@@ -14,6 +14,8 @@ from typing import Callable, Sequence
 import torch
 import torch.nn.functional as F
 
+from .devices import empty_cache
+from .placement import activate_phase, ar_modules
 from .protocol import CODEC_OFFSET, CODEC_SIZE, CONTEXT, MUSIC_END, chunk_ranges
 
 
@@ -182,7 +184,7 @@ class CachedNAR:
         self.backend, self.query_chunk_size = attention, query_chunk_size
         self.fused = fused   # GenerationConfig.nar_attention "fused"
         self.known = None
-        weight = next(model.vae2llm.parameters())
+        weight = model.model.embed_tokens.weight
         self.device, self.dtype = weight.device, weight.dtype
         if chunk.noise.ndim != 2 or chunk.noise.shape[1] != 64 or len(chunk.noise) < 1:
             raise ValueError("Expected nonempty acoustic noise [frames,64]")
@@ -198,8 +200,7 @@ class CachedNAR:
         self.visible_length = min(chunk.nar_cond_end, self.ar_length) if chunk.nar_cond_end else self.ar_length
         positions = torch.arange(self.ar_length, self.ar_length + self.nar_length, device=self.device)[None]
         self.cos, self.sin = model.model.rotary_emb(positions)
-        local = torch.arange(self.nar_length, device=self.device).clamp(max=model.config.max_latent_frames - 1)
-        self.pos_emb = model.latent_pos_embed(local)[None]
+        self.pos_emb = None
         if known is not None:
             if known.ndim != 2 or known.shape[1] != 64 or not len(known) or len(known) > len(chunk.noise):
                 raise ValueError("Leading context must be latents shaped [n,64] with n <= chunk frames")
@@ -207,7 +208,12 @@ class CachedNAR:
                 raise ValueError("Leading context contains non-finite values")
             self.known = known.to(device=self.device, dtype=self.dtype)
         self.cache = []
-        self._prefill()
+        self.work_k = self.work_v = None
+        try:
+            self._prefill()
+        except BaseException:
+            self.close()
+            raise
 
     def _attention(self, q, k, v, causal=False):
         if self.fused:
@@ -246,11 +252,21 @@ class CachedNAR:
         shifted = model._shift_t_value(raw_t, self.device, self.dtype)
         x = model.vae2llm(x_nar[None])
         x = x + model.time_embedder(shifted.expand(self.nar_length))[None]
+        if self.pos_emb is None:
+            local = torch.arange(self.nar_length, device=self.device).clamp(max=model.config.max_latent_frames - 1)
+            self.pos_emb = model.latent_pos_embed(local)[None]
         x = x + self.pos_emb
+        if self.work_k is None:
+            shape = (self.visible_length + self.nar_length, *self.cache[0][0].shape[1:])
+            self.work_k = torch.empty(shape, device=self.device, dtype=self.dtype)
+            self.work_v = torch.empty_like(self.work_k)
         for layer, (ar_k, ar_v) in zip(model.model.layers, self.cache):
             q, k, v = layer.nar_self_attn.project_qkv(layer.nar_input_layernorm(x), self.cos, self.sin)
-            k, v = torch.cat((ar_k, k[0])), torch.cat((ar_v, v[0]))
-            h = self._attention(q[0], k, v)
+            self.work_k[:self.visible_length].copy_(ar_k)
+            self.work_v[:self.visible_length].copy_(ar_v)
+            self.work_k[self.visible_length:].copy_(k[0])
+            self.work_v[self.visible_length:].copy_(v[0])
+            h = self._attention(q[0], self.work_k, self.work_v)
             x = x + layer.nar_self_attn.o_proj(h.flatten(1)[None])
             x = x + layer.nar_mlp(layer.nar_pre_mlp_layernorm(x))
         return model.llm2vae(model.model.norm(x))[0, 1:-1]
@@ -327,15 +343,16 @@ class CachedNAR:
 
     def close(self):
         self.cache.clear()
-        self.cos = self.sin = self.pos_emb = None
+        self.cos = self.sin = self.pos_emb = self.work_k = self.work_v = None
 
 
 @contextmanager
-def _offload_ar(model, enabled):
-    """Temporarily move unused AR modules; this model cannot serve concurrently."""
-    modules = [model.model.embed_tokens, model.lm_head]
-    for layer in model.model.layers:
-        modules.extend((layer.input_layernorm, layer.self_attn, layer.post_attention_layernorm, layer.mlp))
+def _offload_ar(model, enabled, cache=None):
+    """Release the chunk cache before restoring AR weights, even if a transfer fails.
+
+    This model cannot serve concurrently while modules are offloaded.
+    """
+    modules = ar_modules(model)
     moved = []
     try:
         if enabled:
@@ -344,10 +361,12 @@ def _offload_ar(model, enabled):
                 if device.type != "cpu":
                     module.to(device="cpu")
                     moved.append((module, device))
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            for device in {device for _, device in moved}:
+                empty_cache(device)
         yield
     finally:
+        if cache is not None:
+            cache.close()
         for module, device in moved:
             module.to(device=device)
 
@@ -356,7 +375,7 @@ def _offload_ar(model, enabled):
 def synthesize(model, prefix: Sequence[int], codec: Sequence[int], seed: int,
                steps=32, context=CONTEXT, attention="sdpa", offload_ar=False,
                cancelled=None, query_chunk_size=None, chunk_frames=None, overlap_frames=0,
-               known_latents=None, blend_frames=0,
+               known_latents=None, blend_frames=0, low_vram=False,
                on_progress: Callable[[int, int], None] | None = None,
                on_step: Callable[[FlowStep], None] | None = None, noise=None, start_step=0,
                method="midpoint", fused_attention=False):
@@ -390,26 +409,31 @@ def synthesize(model, prefix: Sequence[int], codec: Sequence[int], seed: int,
     chunks = song_chunks(prefix, codec, seed, context, chunk_frames=chunk_frames,
                          overlap_frames=overlap_frames, known_frames=carried, noise=noise)
     output = []
-    for chunk_index, chunk in enumerate(chunks):
-        if cancelled is not None and cancelled():
-            raise InterruptedError("Cancelled before acoustic prefill")
-        known = None
-        blend = 0
-        if chunk_index == 0 and carried:
-            # Hard-pin everything but the last `blend` frames. Those are solved
-            # freely so the model writes its own way out of the carried audio,
-            # then the output crossfades from the take into that solution.
-            blend = max(0, min(int(blend_frames), chunk.lead - 1))
-            known = known_latents[:chunk.lead - blend]
-        elif chunk.lead and output:
-            known = torch.cat(output, dim=0)[-chunk.lead:]
-            if len(known) != chunk.lead:
-                known = None
-        engine = CachedNAR(model, chunk, attention, query_chunk_size, known, fused=fused_attention)
-        # Drop the prefix cache before restoring AR weights, including on
-        # cancellation/failure, to keep the restoration memory peak bounded.
-        with _offload_ar(model, offload_ar):
-            try:
+    device = model.model.embed_tokens.weight.device
+    try:
+        for chunk_index, chunk in enumerate(chunks):
+            if cancelled is not None and cancelled():
+                raise InterruptedError("Cancelled before acoustic prefill")
+            known = None
+            blend = 0
+            if chunk_index == 0 and carried:
+                # Hard-pin everything but the last `blend` frames. Those are solved
+                # freely so the model writes its own way out of the carried audio,
+                # then the output crossfades from the take into that solution.
+                blend = max(0, min(int(blend_frames), chunk.lead - 1))
+                known = known_latents[:chunk.lead - blend]
+            elif chunk.lead and output:
+                known = torch.cat(output, dim=0)[-chunk.lead:]
+                if len(known) != chunk.lead:
+                    known = None
+            if low_vram:
+                activate_phase(model, "ar", device)
+            engine = CachedNAR(model, chunk, attention, query_chunk_size, known, fused=fused_attention)
+            # Drop the prefix cache before restoring AR weights, including on
+            # cancellation/failure, to keep the restoration memory peak bounded.
+            with _offload_ar(model, offload_ar and not low_vram, cache=engine):
+                if low_vram:
+                    activate_phase(model, "nar", device)
                 progress = None
                 if on_progress is not None:
                     def progress(completed, total):
@@ -422,15 +446,17 @@ def synthesize(model, prefix: Sequence[int], codec: Sequence[int], seed: int,
                                          completed, total, 1.0 - completed * (1.0 / total), state, velocity))
                 solved = engine.solve(steps, cancelled, on_progress=progress, on_step=observe,
                                       start_step=start_step, method=method)
-            finally:
-                engine.close()
-        del engine
-        if chunk_index == 0 and carried:
-            head = chunk.lead - blend
-            output.append(known_latents[:head].to(solved.dtype))
-            if blend:
-                ramp = torch.linspace(1.0, 0.0, blend, dtype=solved.dtype).unsqueeze(1)
-                tail = known_latents[head:chunk.lead].to(solved.dtype)
-                output.append(ramp * tail + (1.0 - ramp) * solved[head:chunk.lead])
-        output.append(solved[chunk.lead:] if known is not None else solved)
+            del engine
+            if chunk_index == 0 and carried:
+                head = chunk.lead - blend
+                output.append(known_latents[:head].to(solved.dtype))
+                if blend:
+                    ramp = torch.linspace(1.0, 0.0, blend, dtype=solved.dtype).unsqueeze(1)
+                    tail = known_latents[head:chunk.lead].to(solved.dtype)
+                    output.append(ramp * tail + (1.0 - ramp) * solved[head:chunk.lead])
+            output.append(solved[chunk.lead:] if known is not None else solved)
+    finally:
+        if low_vram:
+            model.to(device="cpu")
+            empty_cache(device)
     return torch.cat(output, dim=0)

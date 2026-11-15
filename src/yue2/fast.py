@@ -60,7 +60,7 @@ def derive_ar_checkpoint(model_dir, cache_dir=None):
     from safetensors.torch import save_file
     model_dir = Path(model_dir)
     source = model_identity(model_dir)
-    config = json.loads((model_dir / "config.json").read_text())
+    config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
     converted = qwen_config(config)
     stamp = {"schema": 1, "source": source, "config": converted}
     key = identity(stamp)
@@ -75,10 +75,13 @@ def derive_ar_checkpoint(model_dir, cache_dir=None):
     with (parent / (key + ".lock")).open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if target.exists():
-            manifest = json.loads((target / "derivation.json").read_text())
+            manifest = json.loads((target / "derivation.json").read_text(encoding="utf-8"))
             if manifest.get("identity") != key or manifest.get("source") != source:
                 raise ValueError("AR cache provenance mismatch; remove this derived cache explicitly")
-            for name, digest in manifest["sha256"].items():
+            hashes = manifest.get("sha256")
+            if not isinstance(hashes, dict) or set(hashes) != {"model.safetensors", "config.json"}:
+                raise ValueError("Incomplete derived AR cache integrity manifest; remove this derived cache explicitly")
+            for name, digest in hashes.items():
                 if sha256_file(target / name) != digest:
                     raise ValueError(f"Corrupt derived AR cache: {name}")
             return target
@@ -92,6 +95,8 @@ def derive_ar_checkpoint(model_dir, cache_dir=None):
                         if name in tensors:
                             raise ValueError(f"Duplicate source tensor: {name}")
                         tensors[name] = reader.get_tensor(name)
+                if config.get("tie_word_embeddings") and "lm_head.weight" not in tensors and "model.embed_tokens.weight" in tensors:
+                    tensors["lm_head.weight"] = tensors["model.embed_tokens.weight"].clone()
                 if set(tensors) != wanted:
                     raise ValueError(f"Missing AR tensors: {sorted(wanted - set(tensors))}")
                 save_file(tensors, temp / "model.safetensors", metadata={"format": "pt"})
@@ -269,10 +274,10 @@ class _Worker:
                             on_token(payload["phase"], event["token"])
                         if event.get("event") == "result":
                             return event["ids"], event["timing"], event["truncated"]
-                if self.process.poll() is not None:
+                if self.process.poll() is not None and not self.selector.select(timeout=0):
                     break
             self.log.flush()
-            details = self.log_path.read_text(errors="replace")[-12000:]
+            details = self.log_path.read_text(encoding="utf-8", errors="replace")[-12000:]
             self.close()
             raise RuntimeError(f"vLLM worker exited without a result: {details}")
 
@@ -359,7 +364,7 @@ async def _worker_main():
     from vllm.engine.arg_utils import AsyncEngineArgs
     from vllm.v1.engine.async_llm import AsyncLLM
     derived = derive_ar_checkpoint(setup["model_dir"])
-    config = json.loads((derived / "config.json").read_text())
+    config = json.loads((derived / "config.json").read_text(encoding="utf-8"))
     total = torch.cuda.get_device_properties(0).total_memory
     budget = min(setup["memory_budget_gib"] * 2**30, total)
     kv_bytes = kv_cache_bytes(config)
